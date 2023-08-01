@@ -1,0 +1,6 @@
+duplicator
+w3-total-cache
+anomify
+popup-builder
+wpdiscuz
+all-in-one-wp-security-and-firewall
