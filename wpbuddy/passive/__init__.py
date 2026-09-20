@@ -1,0 +1,288 @@
+"""Passive phase: GET-only reconnaissance and vulnerability lookups.
+
+Everything here looks like normal browsing traffic (no POSTs, no probes that
+alter state). Returns the discovered components so later phases (active,
+code audit) can build on them.
+
+Plugin discovery layers, most to least stealthy:
+1. asset URLs (wp-content/plugins/...) across crawled pages
+2. content fingerprints (shortcodes, body classes, JS globals, cookies,
+   headers, REST namespaces) - catches plugins hidden from page sources
+3. the user's manual list
+4. optional slug brute-force (--enum-plugins; invasive, off by default)
+
+Every discovery and every version is fed through the confidence layer
+(wpbuddy.confidence): presence sources are combined into a score and a tier
+(CONFIRMED / LIKELY / UNVERIFIED / ASSUMED) that the report shows next to
+each finding, and the same facts populate the per-scan model (the knowledge
+graph exported with --json).
+"""
+
+from .. import config, confidence, vulndb
+from . import content, core_version, files, fingerprints, readme, wprest
+
+
+def run(report, target, args, model=None):
+    """Run the full passive phase. Returns {'plugins': {slug: ver}, 'themes': {slug: ver}}."""
+    if model is None:
+        model = confidence.ScanModel()
+    results = {"plugins": {}, "themes": {}}
+
+    namespaces = wprest.discover_rest_namespaces(target)
+
+    _scan_core(report, target, model)
+    results["plugins"] = _scan_plugins(report, target, args, namespaces, model)
+    results["themes"] = _scan_themes(report, target, model)
+    _scan_rest(report, target, namespaces)
+    files.check_robots(report, target)
+    files.check_sensitive_files(report, target)
+    files.check_headers(report, target)
+    return results
+
+
+def _scan_core(report, target, model):
+    report.section("WordPress core version")
+    resolved = confidence.resolve_core(core_version.discover_core_version(target))
+    if not resolved:
+        print("[!] WordPress core version could not be identified passively")
+        report.paragraph("WordPress core version could not be identified with the passive methods "
+                         "(meta generator, core stylesheet ?ver=, RSS feed, readme.html).")
+        return
+
+    version = resolved["version"]
+    tier = confidence.tier_for(resolved["score"])
+    sources_text = ", ".join(source for _, _, source in resolved["sources"])
+    print(f"[*] WordPress core version: {version} [{tier}] (from {sources_text})")
+    report.paragraph(f"WordPress core version: **{version}** {confidence.label(tier)} "
+                     f"(confidence {resolved['score']}/100) - discovered via {sources_text}.")
+
+    if resolved["discrepancy"]:
+        conflicting = "; ".join(f"**{v}** from the {s}"
+                                for v, _, s in resolved["sources"] if v != version)
+        print(f"[!] Version sources disagree ({conflicting}); using {version}")
+        report.paragraph(f"**Version sources disagree:** {conflicting}; the value in use is "
+                         f"**{version}** (highest-priority source, demoted to {tier}). Stale "
+                         f"page caches and unpatched readme.html files look exactly like this - "
+                         f"treat core findings accordingly.")
+
+    model.add_component("core", "wordpress", version,
+                        version_kind=resolved["sources"][0][1],
+                        presence=[key for _, key, _ in resolved["sources"]],
+                        conf={"score": resolved["score"], "tier": tier})
+
+    report.paragraph("Vulnerabilities known to affect this core version "
+                     "(includes issues fixed in later releases - the site is only patched by updating):")
+
+    vulns = vulndb.affected_vulnerabilities(version, vulndb.core_vulnerabilities(version))
+    if not vulns:
+        report.paragraph("No known vulnerabilities in the wpvulnerability.net database for this version.")
+        return
+    print(f"[!] {len(vulns)} core vulnerabilities reported for {version}")
+    core_presence = [key for _, key, _ in resolved["sources"]]
+    report.bullets([_format_vuln(v, _vuln_tier(core_presence, v)) for v in vulns])
+    for v in vulns:
+        model.add_vulnerability("core:wordpress", v, conf={
+            "score": confidence.score(core_presence, operator_basis=v.get("basis"))})
+    report.paragraph("**Recommendation:** update WordPress core to the latest release.")
+
+
+def _vuln_tier(presence, vuln, version_kind=None):
+    """Confidence label of one vulnerability finding.
+
+    Chains the component's presence evidence, its version provenance and the
+    advisory's applicability basis ('assumed' findings score lower).
+    """
+    value = confidence.score(presence, version_kind=version_kind,
+                             operator_basis=vuln.get("basis"))
+    return confidence.label(value)
+
+
+def _scan_plugins(report, target, args, namespaces, model):
+    report.section("Plugins")
+    pages = content.crawl_page_urls(target, args.max_pages)
+    refs, artifacts = content.discover_refs(pages, target)
+
+    manual = config.load_lines(args.pluginList) if args.pluginList else []
+    fingerprinted = fingerprints.detect(artifacts, namespaces)
+    discovered = refs["plugins"]
+
+    if refs["plugins"]:
+        print(f"[*] Same-site plugin references: {', '.join(sorted(refs['plugins']))}")
+    report.paragraph(f"Plugin references found in {len(pages)} crawled page(s) "
+                     f"(same-site links/assets/inline scripts only; third-party wp-content "
+                     f"URLs are ignored as false positives): "
+                     + (", ".join(f"**{p}**" for p in sorted(refs["plugins"])) or "none"))
+
+    if fingerprinted:
+        print(f"[*] Plugins matched by content fingerprints: {', '.join(sorted(fingerprinted))}")
+        report.paragraph("Plugins identified by content fingerprinting (shortcodes, body classes, "
+                         "JS globals, cookies or REST namespaces - these leave no URL traces):")
+        report.bullets([f"**{p}** (matched via {fingerprints.explain(p)})"
+                        for p in sorted(fingerprinted)])
+
+    enum_installed = []
+    if getattr(args, "enum_plugins", False):
+        from ..active import enumerate as slug_enum  # deferred: avoids import cycle
+        slugs = slug_enum.fetch_popular_slugs(getattr(args, "enum_limit", config.DEFAULT_ENUM_LIMIT))
+        if slugs:
+            enum_installed = slug_enum.enumerate_plugins(report, target, slugs)
+            discovered |= set(enum_installed)
+        else:
+            print("[!] Could not fetch the popular-plugin list from wordpress.org")
+
+    if manual:
+        print(f"[*] Extra plugins from the manual list: {', '.join(manual)}")
+
+    # Evidence per slug: every layer that pointed at it becomes a presence
+    # source, combined into a confidence score/tier by wpbuddy.confidence.
+    presence = {}
+    for slug in discovered:
+        presence.setdefault(slug, []).append("page-reference")
+    for slug in fingerprinted:
+        presence.setdefault(slug, []).append("fingerprint")
+    for slug in enum_installed:
+        presence.setdefault(slug, []).append("enum-200")
+    for slug in manual:
+        presence.setdefault(slug, []).append("manual-list")
+
+    versions, version_kinds = {}, {}
+    for slug in sorted(presence):
+        version, src, kind = readme.find_component_version(target, "plugins", slug)
+        versions[slug] = version
+        version_kinds[slug] = kind
+        comp_score = confidence.score(presence[slug], version_kind=kind)
+        tier = confidence.tier_for(comp_score)
+        model.add_component("plugin", slug, version, kind, presence[slug],
+                            conf={"score": comp_score, "tier": tier})
+        if version:
+            print(f"[*] Plugin {slug}: version {version} ({kind}) [{tier}]")
+
+    # A readable readme.txt on the TARGET is proof of installation; a bare page
+    # reference is not. Report provenance honestly instead of one big list.
+    confirmed_no_version = (set(enum_installed) | fingerprinted) - {s for s, v in versions.items() if v}
+    unverified = [s for s, v in versions.items()
+                  if not v and s not in confirmed_no_version and s in refs["plugins"]]
+
+    report.section("Plugin vulnerability analysis (wpvulnerability.net)")
+    for slug, version in versions.items():
+        if not version:
+            continue
+        tier = confidence.tier_for(
+            confidence.score(presence[slug], version_kind=version_kinds[slug]))
+        vulns = vulndb.plugin_vulnerabilities(slug)
+        if vulns is None:
+            report.paragraph(f"**{slug}** {version} {confidence.label(tier)} (readme verified on "
+                             f"target) - not present in the vulnerability database (not a "
+                             f"wordpress.org slug or simply unresearched).")
+            continue
+        affected = vulndb.affected_vulnerabilities(version, vulns)
+        if not affected:
+            report.paragraph(f"**{slug}** {version} {confidence.label(tier)} (readme verified on "
+                             f"target) - no known vulnerabilities affect this version.")
+            continue
+        print(f"[!] {len(affected)} vulnerabilities affect {slug} {version}")
+        report.paragraph(f"**{slug}** {version} {confidence.label(tier)} is affected by:")
+        report.bullets([_format_vuln(v, _vuln_tier(presence[slug], v, version_kinds[slug]))
+                        for v in affected])
+        for v in affected:
+            model.add_vulnerability(f"plugin:{slug}", v, conf={
+                "score": confidence.score(presence[slug], version_kind=version_kinds[slug],
+                                          operator_basis=v.get("basis"))})
+        report.paragraph(f"**Recommendation:** update **{slug}** to its latest version.")
+
+    if confirmed_no_version:
+        report.paragraph("Present on the target but version unknown "
+                         + "(presence confirmed by enumeration or fingerprint; readme files not "
+                           "readable; CVE matching impossible without a version): "
+                         + ", ".join(f"**{s}** {confidence.label(confidence.score(presence[s]))}"
+                                     for s in sorted(confirmed_no_version)))
+    if unverified:
+        report.paragraph("Unverified references - plugins named in page sources whose readme "
+                         "could not be read and which enumeration did not confirm. These may "
+                         "be stale or third-party content and are NOT treated as findings: "
+                         + ", ".join(f"{s}" for s in unverified))
+    manual_unverified = [s for s in manual if not versions.get(s)]
+    if manual_unverified:
+        report.paragraph("User-supplied slugs that could not be confirmed on the target "
+                         "(readme not readable): " + ", ".join(f"{s}" for s in manual_unverified))
+    return versions
+
+
+def _scan_themes(report, target, model):
+    report.section("Theme")
+    pages = [target]  # theme refs are on the homepage; avoid re-crawling here
+    refs, _ = content.discover_refs(pages, target)
+    themes = sorted(refs["themes"])
+    if not themes:
+        print("[!] No theme identified")
+        report.paragraph("No theme could be identified in the page sources.")
+        return {}
+
+    for theme in themes:
+        report.paragraph(f"Theme discovered: **{theme}** (wp-content/themes/{theme})")
+
+    versions = {}
+    for slug in themes:
+        version, src, kind = readme.find_component_version(target, "themes", slug)
+        versions[slug] = version
+        comp_score = confidence.score(["page-reference"], version_kind=kind)
+        tier = confidence.tier_for(comp_score)
+        model.add_component("theme", slug, version, kind, ["page-reference"],
+                            conf={"score": comp_score, "tier": tier})
+        if version:
+            print(f"[*] Theme {slug}: version {version} ({kind}) [{tier}]")
+            report.paragraph(f"Theme **{slug}** version: **{version}** {confidence.label(tier)} "
+                             f"(from {src})")
+            vulns = vulndb.theme_vulnerabilities(slug)
+            if vulns is None:
+                report.paragraph(f"**{slug}** - not present in the vulnerability database.")
+            else:
+                affected = vulndb.affected_vulnerabilities(version, vulns)
+                if affected:
+                    print(f"[!] {len(affected)} vulnerabilities affect theme {slug} {version}")
+                    report.paragraph(f"Theme **{slug}** {version} is affected by:")
+                    report.bullets([_format_vuln(v, _vuln_tier(["page-reference"], v, kind))
+                                    for v in affected])
+                    for v in affected:
+                        model.add_vulnerability(f"theme:{slug}", v, conf={
+                            "score": confidence.score(["page-reference"], version_kind=kind,
+                                                      operator_basis=v.get("basis"))})
+                else:
+                    report.paragraph(f"Theme **{slug}** {version} - no known vulnerabilities affect "
+                                     f"this version.")
+        else:
+            report.paragraph(f"Theme **{slug}** - version could not be determined.")
+    return versions
+
+
+def _scan_rest(report, target, namespaces):
+    report.section("REST API (/wp-json/) discovery")
+    if namespaces is None:
+        report.paragraph("The REST API index is not readable (disabled, restricted or WAF'd).")
+        return
+    if namespaces:
+        print(f"[*] Plugin REST namespaces exposed: {', '.join(namespaces)}")
+        report.paragraph("Plugins registering their own REST routes (fingerprint via /wp-json/):")
+        report.bullets(namespaces)
+    else:
+        report.paragraph("REST API is enabled but exposes only core namespaces.")
+
+
+def _format_vuln(v, tier_label=None):
+    text = f"**{v['name']}**"
+    if tier_label:
+        text += f" {tier_label}"
+    if v.get("severity"):
+        text += f" (CVSS {v['severity']})"
+    if v["description"]:
+        text += f": {v['description']}"
+    basis = {"bounded": "version range matched",
+             "unfixed": "listed as unfixed - affects all versions",
+             "assumed": "NO version range recorded - applicability assumed"}.get(v.get("basis"))
+    if basis:
+        text += f" ({basis})"
+    # the advisory carries the actual exploitation details (vulnerable endpoint,
+    # parameters, PoC steps) that a scanner cannot responsibly auto-fire
+    if v.get("link"):
+        text += f" ([advisory with exploitation details]({v['link']}))"
+    return text

@@ -1,0 +1,1 @@
+{"name":"Mock WP","namespaces":["oembed/1.0","wp/v2","wp-block-editor/v1","contact-form-7/v1","wpdiscuz/v1"],"authentication":[],"routes":{"/wp/v2/users":{}}}

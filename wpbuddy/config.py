@@ -1,0 +1,47 @@
+"""Shared configuration: paths and defaults."""
+
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
+
+# HTTP defaults (see wpbuddy.httpclient)
+DEFAULT_TIMEOUT = 10.0
+DEFAULT_RETRIES = 3
+RETRY_DELAY = 3.0
+
+# Politeness delay in seconds applied after every request when > 0.
+# Set from the CLI (--delay); 0 means "as fast as possible".
+REQUEST_DELAY = 0.0
+
+# Covert-traffic settings (see wpbuddy.stealth / --covert)
+REQUEST_JITTER = 0.0      # extra uniform random pause in [0, jitter] per request
+PERSONA = None            # browser persona for the whole scan (set by init_networking)
+HTTP_BACKEND = "requests"  # or "curl_cffi" when impersonation is active
+EVADE = True              # retry WAF-blocked probes through path obfuscation (--no-evade)
+
+# Passive crawling
+MAX_CRAWL_PAGES = 5
+
+# User enumeration
+MAX_USER_IDS = 25
+
+# Code audit
+MAX_AUDIT_FILES = 60
+MAX_AUDIT_FILE_SIZE = 1_000_000  # skip files bigger than 1 MB (likely minified/assets)
+MAX_POC_VERIFICATIONS = 15       # live PoC attempts per scan (--verify-pocs)
+MAX_REPORT_FINDINGS = 40         # per component; extras are summarized, not listed
+MAX_POC_TEMPLATES = 20           # manual-PoC commands listed per component
+
+# Plugin slug enumeration (--enum-plugins)
+DEFAULT_ENUM_LIMIT = 300
+
+
+def load_lines(path):
+    """Read a text file of one-entry-per-line, skipping blanks and comments."""
+    try:
+        return [l.strip() for l in Path(path).read_text(encoding="utf-8").splitlines()
+                if l.strip() and not l.strip().startswith("#")]
+    except OSError as e:
+        print(f"[!] Could not read {path}: {e}")
+        return []
