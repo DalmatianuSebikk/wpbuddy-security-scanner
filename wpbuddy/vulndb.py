@@ -38,15 +38,55 @@ _nvd_cache = {}
 _nvd_last_fetch = 0.0
 
 # Advisory "names" that are actually scraped error/interstitial page titles.
+# Phrase-tightened: "Error Log Viewer <= 2.1 - XSS" is a real advisory name
+# and must survive - only actual error-page shapes count as junk.
 _JUNK_NAME_RE = re.compile(
-    r"^\s*(?:error|40[0-9]|50[0-9])\b|not found|access denied|just a moment|"
-    r"attention required|forbidden", re.I)
+    r"^\s*(?:40[0-9]|50[0-9])\b|^\s*error\s*(?:page|code)?\s*$"
+    r"|not found|access denied|just a moment|attention required|forbidden", re.I)
 _CVE_ID_RE = re.compile(r"(CVE-\d{4}-\d{4,})", re.I)
 
-# Version bounds stated inside advisory titles ("... plugin <= 7.5.0 - ...").
-_TITLE_MAX_LE = re.compile(r"(?:<=|≤|up to|through)\s*v?(\d+(?:\.\d+)+)", re.I)
-_TITLE_MAX_LT = re.compile(r"(?:<|before|earlier than)\s*v?(\d+(?:\.\d+)+)", re.I)
-_TITLE_EARLIER = re.compile(r"v?(\d+(?:\.\d+)+)\s*(?:and earlier|and below)", re.I)
+# Version bounds stated in advisory titles AND descriptions. Descriptions
+# matter as much as titles: the Complianz advisories carry "<= 7.5.0" only in
+# the description body, and core advisories list whole range sets
+# ("7.1 before 7.1.1; 7.0 through 7.0.4; ...").
+_V = r"v?(\d+(?:\.\d+)+)"
+_LE_BOUNDS = re.compile(
+    rf"(?:<=|&lt;=|≤|up to|through)\s*{_V}"
+    rf"|{_V}\s*(?:and earlier|and below)"
+    rf"|\d+(?:\.\d+)+\s*(?:through|-|to)\s*{_V}", re.I)
+_LT_BOUNDS = re.compile(rf"(?:<|&lt;|before|prior to|earlier than)\s*{_V}", re.I)
+
+
+def _upper_bounds(text):
+    """[(bound, 'le'|'lt'), ...] - every upper version bound stated in `text`."""
+    # the bound can land in any of the alternation's capture groups
+    out = [(next(g for g in m.groups() if g), "le")
+           for m in _LE_BOUNDS.finditer(text or "")]
+    out += [(m.group(1), "lt") for m in _LT_BOUNDS.finditer(text or "")]
+    return out
+
+
+def _url_bounds(url, slug):
+    """Version bounds encoded in advisory URLs right after the component slug.
+
+    Wordfence marks the affected ceiling in the slug with dots STRIPPED
+    ('...-custom-post-order-313-...' = 3.1.3); Patchstack keeps dots
+    ('...-2.0.1-...'), some feeds use dashes ('3-1-3'). Dotted/dashed forms
+    become ordinary 'le' bounds; dashless digit runs get the 'digits'
+    comparison (installed with dots stripped, compared as integers) - safe
+    because a missed contradiction is recoverable but a manufactured one
+    is not. Numbers not anchored to the slug (ids, years) never match.
+    """
+    if not url or not slug:
+        return []
+    bounds = []
+    for m in re.finditer(rf"(?:^|[/._-]){re.escape(slug)}[-_](\d+(?:[-.]\d+)*)(?=[-/_]|$)", url):
+        token = m.group(1)
+        if "-" in token or "." in token:
+            bounds.append((token.replace("-", "."), "le"))
+        else:
+            bounds.append((token, "digits"))
+    return bounds
 
 
 def _clean_name(raw_name, link):
@@ -55,28 +95,6 @@ def _clean_name(raw_name, link):
         return raw_name or "Unnamed issue"
     cve = _CVE_ID_RE.search(link or "") or _CVE_ID_RE.search(raw_name)
     return (cve.group(1) if cve else "Unnamed advisory") + " (advisory title unreadable)"
-
-
-def _title_contradicts(installed, name):
-    """True when the advisory title's own version bound excludes `installed`.
-
-    Titles like "Plugin <= 7.5.0 - Object Injection" carry the range the
-    operator object sometimes lacks; when the flag says unfixed/assumed but
-    the title bounds the issue below the installed version, the upstream
-    entry is stale - the site is very likely already patched.
-    """
-    bound, op = None, None
-    match = _TITLE_MAX_LE.search(name) or _TITLE_EARLIER.search(name)
-    if match:
-        bound, op = match.group(1), "le"
-    else:
-        match = _TITLE_MAX_LT.search(name)
-        if match:
-            bound, op = match.group(1), "lt"
-    if not bound:
-        return False
-    cmp = compare_versions(installed, bound)
-    return (op == "le" and cmp > 0) or (op == "lt" and cmp >= 0)
 
 
 def _fetch(kind, slug):
@@ -147,10 +165,12 @@ def is_affected(installed_version, operator):
     return True, "bounded"
 
 
-def affected_vulnerabilities(installed_version, vulns):
+def affected_vulnerabilities(installed_version, vulns, slug=None):
     """Filter a raw API vulnerability list down to deduplicated, affected entries.
 
     Each entry carries the applicability 'basis' for the confidence layer.
+    `slug` enables the URL-bound cross-check (advisory links often encode the
+    affected ceiling after the component slug).
     """
     out, seen = [], set()
     for vuln in vulns or []:
@@ -160,9 +180,22 @@ def affected_vulnerabilities(installed_version, vulns):
         source = (vuln.get("source") or [{}])[0]
         link = source.get("link")
         name = _clean_name(source.get("name") or vuln.get("name"), link)
-        if affected and basis != "bounded" and _title_contradicts(installed_version, name):
-            basis = "contradicted"
         description = source.get("description") or ""
+        if affected and basis != "bounded":
+            bounds = (_upper_bounds(name) + _upper_bounds(description)
+                      + _url_bounds(link, slug))
+
+            def excluded(bound, op):
+                if op == "digits":
+                    try:
+                        return int(installed_version.replace(".", "")) > int(bound)
+                    except ValueError:
+                        return False
+                cmp = compare_versions(installed_version, bound)
+                return cmp > 0 if op == "le" else cmp >= 0
+
+            if bounds and all(excluded(bound, op) for bound, op in bounds):
+                basis = "contradicted"
         # The same issue often arrives from several sources (CVE + WPScan +
         # Wordfence); dedupe on the description text, like the core scan intended.
         key = description or name

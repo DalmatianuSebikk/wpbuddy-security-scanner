@@ -317,6 +317,58 @@ def test_robots_filters_default_entries(mock):
     assert "/wp-admin/" not in text.split("Interesting")[1]  # default dropped
 
 
+def test_robots_empty_disallow_does_not_capture_next_line(monkeypatch):
+    """The Yoast block ('Disallow:' with no value, then 'Sitemap:') once made
+    'Sitemap:' appear as an interesting disallowed path."""
+    from wpbuddy import httpclient
+
+    yoast = ("# START YOAST BLOCK\nUser-agent: *\nDisallow:\n\n"
+             "Sitemap: https://site.example.com/sitemap_index.xml\n# END YOAST BLOCK\n")
+    monkeypatch.setattr(httpclient, "get",
+                        lambda url, **kw: FakeResp(200, yoast) if "robots.txt" in url
+                        else FakeResp(404))
+    report = Report()
+    files.check_robots(report, "https://site.example.com/")
+    text = report.doc.write()
+    # the raw robots.txt body is echoed verbatim (it contains 'Sitemap:'); the
+    # bug was Sitemap leaking into the interesting-DISALLOW list
+    if "Interesting" in text:
+        assert "Sitemap:" not in text.split("Interesting", 1)[1]
+
+
+def test_security_txt_check(monkeypatch):
+    from wpbuddy import httpclient
+
+    def server(body_by_path):
+        def fake_get(url, **kw):
+            for suffix, body in body_by_path.items():
+                if url.endswith(suffix):
+                    return FakeResp(200, body)
+            return FakeResp(404)
+        return fake_get
+
+    # published with a contact -> positive finding
+    monkeypatch.setattr(httpclient, "get", server({
+        "security.txt": "Contact: mailto:security@example.com\nExpires: 2027-01-01T00:00:00Z"}))
+    report = Report()
+    files.check_security_txt(report, "https://site.example.com/")
+    text = report.doc.write()
+    assert "security.txt" in text and "security@example.com" in text
+
+    # a 200 challenge page must not count as a security.txt
+    monkeypatch.setattr(httpclient, "get", server({
+        "security.txt": "<html><title>One moment, please</title></html>"}))
+    report = Report()
+    files.check_security_txt(report, "https://site.example.com/")
+    assert "security.txt is published" not in report.doc.write()
+
+    # absent -> nothing reported (absence is the norm, not a finding)
+    monkeypatch.setattr(httpclient, "get", server({}))
+    report = Report()
+    files.check_security_txt(report, "https://site.example.com/")
+    assert "security.txt" not in report.doc.write()
+
+
 # ---------------------------------------------------------------- error page analysis
 
 # a real Wordfence/dp-preloader fatal page observed on a hardened WordPress site
@@ -369,6 +421,20 @@ def test_errorpage_report_section(monkeypatch):
     assert "server path disclosed: `/home/ecomedbt/public_html/`" in text
     assert "**dp-preloader**" in text and "1 recorded vulnerabilities" in text
     assert "Wordfence" in text
+
+
+def test_errorpage_no_disclosure_honest_intro(monkeypatch):
+    """A bare HTML 500 with nothing recognizable must not be introduced as
+    'discloses server paths, components, defensive layers'."""
+    from wpbuddy.passive import errorpages
+    errorpages.reset()
+    errorpages.inspect(FakeResp(500, "<html><body>error</body></html>",
+                                url="https://site.example.com/oops"))
+    report = Report()
+    errorpages.write_report(report)
+    text = report.doc.write()
+    assert "None of them contained recognizable disclosure" in text
+    assert "discloses server paths" not in text
 
 
 def test_no_retry_storm_on_server_errors(monkeypatch):
@@ -695,6 +761,62 @@ def test_advisory_title_contradiction_demotes():
     assert vulndb.affected_vulnerabilities("3.1.3", earlier)[0]["basis"] == "unfixed"
 
 
+def test_bounds_parsed_from_descriptions():
+    """The FP class that survived 0.3.0's title-only parser: bounds stated in
+    the DESCRIPTION body (bare CVE names carry them there)."""
+    # CVE-2026-65498 shape: bare CVE title, bound only in the description
+    desc_only = [{"operator": {"unfixed": "1"},
+                  "source": [{"name": "CVE-2026-65498",
+                              "description": "[en] Unauthenticated Sensitive Data "
+                                             "Exposure in Complianz <= 7.5.0 versions."}]}]
+    assert vulndb.affected_vulnerabilities("7.5.5", desc_only)[0]["basis"] == "contradicted"
+    assert vulndb.affected_vulnerabilities("7.5.0", desc_only)[0]["basis"] == "unfixed"
+
+    # CVE-2026-93485 shape: full range list in prose; installed is the fixed boundary
+    range_list = [{"operator": {},
+                   "source": [{"name": "CVE-2026-93485",
+                               "description": "This issue affects WordPress versions "
+                                              "7.1 before 7.1.1; 7.0 through 7.0.4; "
+                                              "6.4 through 6.4.10; 5.9 through 5.9.16."}]}]
+    assert vulndb.affected_vulnerabilities("7.1.1", range_list)[0]["basis"] == "contradicted"
+    assert vulndb.affected_vulnerabilities("6.4.5", range_list)[0]["basis"] != "contradicted"
+
+    # a bound that could still include the version suppresses the verdict
+    mixed = [{"operator": {"unfixed": "1"},
+              "source": [{"name": "X", "description": "fixed in 7.5.1; reintroduced 8.0 "
+                                                      "through 8.0.1"}]}]
+    assert vulndb.affected_vulnerabilities("7.5.5", mixed)[0]["basis"] == "unfixed"
+
+
+def test_advisory_junk_name_keeps_real_error_titles():
+    """'Error Log Viewer <= 2.1 - XSS' is a legitimate advisory name, not a
+    scraped 404 page - the junk filter must be phrase-tight."""
+    vulns = [{"operator": {"unfixed": "1"},
+              "source": [{"name": "Error Log Viewer <= 2.1 - Stored XSS",
+                          "description": "stored xss via log viewer"}]}]
+    name = vulndb.affected_vulnerabilities("2.1", vulns)[0]["name"]
+    assert name == "Error Log Viewer <= 2.1 - Stored XSS"
+
+
+def test_advisory_url_slug_bounds():
+    """Wordfence encodes the affected ceiling in the URL slug
+    ('...-custom-post-order-313-...' = <= 3.1.3); a garbage advisory name
+    with a slug-bounded link must still be contradicted."""
+    url = ("https://www.wordfence.com/threat-intel/vulnerabilities/wordpress-plugins/"
+           "intuitive-custom-post-order/"
+           "intuitive-custom-post-order-313-missing-authorization-to-authenticated-settings-change")
+    vulns = [{"operator": {"unfixed": "1"},
+              "source": [{"name": "404 Page Not Found", "link": url}]}]
+    out = vulndb.affected_vulnerabilities("3.2.0", vulns, slug="intuitive-custom-post-order")
+    assert out[0]["basis"] == "contradicted"   # 3.2.0 > 3.1.3
+    out = vulndb.affected_vulnerabilities("3.1.2", vulns, slug="intuitive-custom-post-order")
+    assert out[0]["basis"] == "unfixed"        # inside the bound
+    # numbers NOT anchored to the slug (ids, dates) must not create bounds
+    loose = [{"operator": {"unfixed": "1"},
+              "source": [{"name": "X", "link": "https://example.com/2026/05/id-99871-advisory"}]}]
+    assert vulndb.affected_vulnerabilities("9.9", loose, slug="x")[0]["basis"] == "unfixed"
+
+
 # ---------------------------------------------------------------- NVD enrichment
 
 NVD_PAYLOAD = {"vulnerabilities": [{"cve": {
@@ -955,6 +1077,89 @@ def test_analyzer_is_admin_is_not_authorization(tmp_path):
     assert hits and hits[0]["severity"] == "HIGH"
 
 
+def test_analyzer_ajax_rule_follows_one_hop_delegation(tmp_path):
+    """The real Yoast pattern: thin wp_ajax wrappers delegate to a helper
+    that DOES check_ajax_referer - not a finding (once tripped the rule)."""
+    tmp_path.joinpath("yoast.php").write_text(
+        '<?php\n'
+        "add_action('wp_ajax_wpseo_save_title', 'wpseo_save_title');\n"
+        "function wpseo_save_title() {\n"
+        "    _deprecated_function(__FUNCTION__, 'Yoast SEO 28.1');\n"
+        "    wpseo_save_what('title');\n"
+        "}\n"
+        "function wpseo_save_what($what) {\n"
+        "    check_ajax_referer('wpseo-bulk-editor');\n"
+        "    if (!current_user_can('edit_posts')) { wp_die('no'); }\n"
+        "}\n"
+    )
+    hits = [f for f in analyzer.analyze(tmp_path) if f["rule"] == "ajax-handler-no-auth"]
+    assert hits == []
+
+    # same shape but the helper has NO check either -> still a finding
+    tmp_path.joinpath("bad.php").write_text(
+        '<?php\n'
+        "add_action('wp_ajax_nopriv_export', 'export_it');\n"
+        "function export_it() { do_export(); }\n"
+        "function do_export() { echo file_get_contents($_GET['f']); }\n"
+    )
+    hits = [f for f in analyzer.analyze(tmp_path) if f["rule"] == "ajax-handler-no-auth"]
+    assert hits and hits[0]["severity"] == "HIGH"
+
+
+def test_analyzer_ajax_rule_accepts_nonce_wrappers(tmp_path):
+    """Framework nonce wrappers (WPSEO_Utils::verify_nonce, $this->verify_nonce)
+    satisfy the authorization requirement."""
+    tmp_path.joinpath("wrapped.php").write_text(
+        '<?php\n'
+        "add_action('wp_ajax_save_thing', 'save_thing');\n"
+        "function save_thing() { WPSEO_Utils::verify_nonce(); update_option('x', 1); }\n"
+    )
+    hits = [f for f in analyzer.analyze(tmp_path) if f["rule"] == "ajax-handler-no-auth"]
+    assert hits == []
+
+
+def test_analyzer_csrf_skips_psr4_class_files(tmp_path):
+    """Yoast-style PSR-4 conditionals are autoloaded class definitions, never
+    routed directly - csrf-no-nonce must not fire on them."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "conditional.php").write_text(
+        '<?php\n'
+        "namespace Yoast\\WP\\SEO\\Conditionals;\n"
+        "class Estimated_Reading_Time_Conditional implements Conditional {\n"
+        "\tpublic function is_met() { return isset($_POST['x']); }\n"
+        "}\n"
+    )
+    csrf = [f for f in analyzer.analyze(tmp_path) if f["rule"] == "csrf-no-nonce"]
+    assert csrf == []
+
+    # a genuinely routed procedural file still gets the heuristic
+    tmp_path.joinpath("routed.php").write_text(
+        '<?php add_action("admin_post_save", "save"); function save() { echo $_POST["d"]; }\n'
+    )
+    csrf = [f for f in analyzer.analyze(tmp_path) if f["rule"] == "csrf-no-nonce"]
+    assert csrf and csrf[0]["file"] == "routed.php"
+
+
+def test_analyzer_demotes_bundled_vendor_code(tmp_path):
+    """eval() inside vendor_prefixed/twig is bundled framework code - real,
+    but one severity step down and labelled, not billed as the plugin's own."""
+    vendor = tmp_path / "vendor_prefixed" / "twig"
+    vendor.mkdir(parents=True)
+    vendor.joinpath("environment.php").write_text(
+        '<?php eval("?> " . $content);\n'
+    )
+    hits = analyzer.analyze(tmp_path)
+    evals = [f for f in hits if f["rule"] == "eval-usage"]
+    assert evals and evals[0]["severity"] == "MEDIUM"   # HIGH demoted one step
+    assert "bundled vendor/test code" in evals[0]["description"]
+
+    # the plugin author's own eval stays HIGH, unlabelled
+    tmp_path.joinpath("own.php").write_text('<?php eval($x . "!");\n')
+    own = [f for f in analyzer.analyze(tmp_path)
+           if f["rule"] == "eval-usage" and f["file"] == "own.php"]
+    assert own and own[0]["severity"] == "HIGH"
+
+
 def test_divi_changelog_version():
     """Changelogs are newest-first: the head version wins (Divi 4.27.7, not 4.16)."""
     changelog = (
@@ -982,6 +1187,79 @@ def test_gather_from_target_listing(mock, tmp_path):
     mirrored = [p.name for p in dest.rglob("*") if p.is_file()]
     assert "vulnplugin.php" in mirrored
     assert "shell.php" in mirrored  # nested via inc/ sub-listing
+
+
+# ------------------------------------------------------- multi-method gathering
+
+def _plugin_zip_bytes(slug, version):
+    """A minimal plugin archive: {slug}/{slug}.php header + readme Stable tag."""
+    import io as _io
+    buffer = _io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr(f"{slug}/{slug}.php",
+                    f"<?php\n/**\n * Plugin Name: {slug}\n * Version: {version}\n */\n")
+        zf.writestr(f"{slug}/readme.txt", f"=== {slug} ===\nStable tag: {version}\n")
+    return buffer.getvalue()
+
+
+def test_gather_prefers_operator_zip(tmp_path):
+    """A licensed copy in --source-dir wins over every download method, and
+    the archive's self-reported version is verified."""
+    src = tmp_path / "sources"
+    src.mkdir()
+    (src / "plugin-demo-1.2.3.zip").write_bytes(_plugin_zip_bytes("demo", "1.2.3"))
+    dest = tmp_path / "out"
+    source, origin, reason = gather.gather_from_wordpress(
+        "plugin", "demo", "1.2.3", dest, source_dir=src)
+    assert source == dest and reason is None
+    assert "operator-provided" in origin and "WARNING" not in origin
+    assert (dest / "demo" / "demo.php").exists()
+
+
+def test_gather_flags_operator_zip_version_mismatch(tmp_path):
+    """Right file name, wrong contents: audited, but the origin says so."""
+    src = tmp_path / "sources"
+    src.mkdir()
+    (src / "plugin-demo-1.2.3.zip").write_bytes(_plugin_zip_bytes("demo", "1.0.0"))
+    source, origin, reason = gather.gather_from_wordpress(
+        "plugin", "demo", "1.2.3", tmp_path / "out", source_dir=src)
+    assert source is not None
+    assert "self-reports 1.0.0, expected 1.2.3" in origin
+
+
+def test_gather_api_version_map_resolution(monkeypatch, tmp_path):
+    """The wordpress.org API versions map wins over URL guessing, with
+    zero-padding normalization ('2.0' matches published '2.0.0')."""
+    payload = {"slug": "demo", "versions": {
+        "1.9.0": "https://downloads.wordpress.org/plugin/demo.1.9.0.zip",
+        "2.0.0": "https://downloads.wordpress.org/plugin/demo.2.0.0.zip"}}
+    monkeypatch.setattr(httpclient, "get_json",
+                        lambda url, **kw: payload if "api.wordpress.org" in url else None)
+
+    def fake_get(url, **kw):
+        assert "demo.2.0.0.zip" in url          # the API's exact link, not a guess
+        resp = FakeResp(200, "zip")
+        resp.content = _plugin_zip_bytes("demo", "2.0.0")
+        return resp
+
+    monkeypatch.setattr(httpclient, "get", fake_get)
+    source, origin, reason = gather.gather_from_wordpress(
+        "plugin", "demo", "2.0", tmp_path / "out")
+    assert source is not None and "matched published 2.0.0" in origin
+
+
+def test_gather_reports_why_it_failed(monkeypatch, tmp_path):
+    """Failures carry a machine reason the report can explain honestly."""
+    def server(api_payload):
+        monkeypatch.setattr(httpclient, "get_json",
+                            lambda url, **kw: api_payload if "api.wordpress.org" in url else None)
+        monkeypatch.setattr(httpclient, "get", lambda url, **kw: None)
+        return gather.gather_from_wordpress("plugin", "demo", "1.0", tmp_path / "out")
+
+    assert server({"error": "not found"})[2] == "not-hosted"
+    assert server({"slug": "demo", "versions": {"9.9.9": "x"}})[2] == "version-not-published"
+    assert server(None)[2] == "download-failed"
+    assert gather.gather_from_wordpress("plugin", "demo", None, tmp_path / "o")[2] == "no-version"
 
 
 # ---------------------------------------------------------------- slug enumeration

@@ -141,9 +141,18 @@ def write_report(report, known_plugins=()):
     report.section("Server error pages (disclosure)")
 
     total = sum(e["count"] for e in _seen.values())
-    report.paragraph(f"{total} error response(s) were analyzed; PHP fatals leak internal "
-                     f"structure even when the site looks opaque. Each distinct error page below "
-                     f"discloses server paths, active components, or defensive layers.")
+    discloses = any(e["paths"] or e["plugins"] or e["themes"] or e["notes"]
+                    for e in _seen.values())
+    if discloses:
+        report.paragraph(f"{total} error response(s) were analyzed; PHP fatals leak internal "
+                         f"structure even when the site looks opaque. Each distinct error page "
+                         f"below discloses what it actually contains - server paths, active "
+                         f"components, or defensive layers.")
+    else:
+        report.paragraph(f"{total} error response(s) were analyzed. None of them contained "
+                         f"recognizable disclosure (no paths, component names or security "
+                         f"layers) - the error handling is doing its job; only the responses "
+                         f"themselves are noted.")
 
     for entry in _seen.values():
         again = f" (seen {entry['count']}x)" if entry["count"] > 1 else ""

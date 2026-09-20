@@ -33,6 +33,7 @@ python main.py --target https://example.com/ --user admin                    # +
 python main.py --target https://example.com/ --user admin --via-xmlrpc       # + credential testing (system.multicall)
 python main.py --target https://example.com/ --enum-plugins --verify-pocs    # + slug brute-force + live PoCs
 python main.py --target https://example.com/ --json                          # + machine-readable knowledge graph
+python main.py --target https://example.com/ --source-dir ~/licensed-zips    # + audit commercial/custom code you own
 ```
 
 Full options: `python main.py --help`
@@ -168,6 +169,15 @@ Better vulnerability confirmation and recon coverage, inspired by published
 CVE-hunting and bug-hunting workflows.
 
 **Added**
+- **multi-method source gathering** for the code audit: operator-provided
+  archives (`--source-dir`, for commercial plugins and custom code where a
+  licensed copy is the only legitimate source) -> the wordpress.org info
+  API's per-version download links (kills URL-naming edge cases, says
+  definitively when a component is not hosted there) -> the classic direct
+  URL guess. Every successful extraction is version-verified (the archive's
+  own `Version:`/`Stable tag:` must match; mismatches are audited but loudly
+  labelled), and the report lists each ungatherable component with the
+  actual reason instead of a console shrug
 - **Upstream data hygiene** (wpvulnerability.net serves occasional garbage):
   advisory names that are really scraped error-page titles ("404 Page Not
   Found") are replaced by their CVE id; version bounds stated in advisory
@@ -198,6 +208,36 @@ CVE-hunting and bug-hunting workflows.
   listings at 10 users).
 
 **Fixed**
+- version bounds are parsed from advisory URLs too: Wordfence encodes the
+  affected ceiling in the link slug with dots stripped
+  ("...-custom-post-order-313-..." = 3.1.3), Patchstack keeps dots - the
+  last standing false positive on our test site
+- `csrf-no-nonce` fired on PSR-4 class/namespace files that WordPress
+  autoloads but never routes directly (Yoast conditionals); endpoint
+  detection is now content-based (files registering hooks/menus/routes)
+- findings inside bundled vendor/test code (Twig's eval, PHPUnit helpers)
+  are demoted one severity step and labelled as not plugin-author code
+- the error-page section no longer claims path/component disclosure for
+  bare HTML error pages that contain none
+- version bounds are parsed from advisory **descriptions** too, not just
+  titles - the false-positive class that survived the title-only parser
+  (bare-CVE advisories carrying "<= 7.5.0" in the body, and core advisories
+  listing whole range sets like "7.1 before 7.1.1; 7.0 through 7.0.4")
+- the AJAX no-auth rule follows one hop of same-file delegation (the thin
+  wrapper -> helper-with-check_ajax_referer pattern) and accepts framework
+  nonce wrappers (`verify_nonce`); both caused false positives on Yoast SEO
+- robots.txt: an empty `Disallow:` could swallow the newline and report the
+  next line's first word ("Sitemap:") as a hidden path
+- the audit cache directory now includes the component version - a cached
+  download of 2.1 was previously audited and reported as the running 2.4
+- report shape: LOW/INFO audit findings compressed to a count line instead
+  of burying HIGH/MEDIUM evidence; multi-paragraph advisory descriptions
+  truncated to one line; clean-plugin list condensed; list bullets no
+  longer double-spaced
+- advisory junk-name filter tightened so real titles ("Error Log Viewer
+  <= 2.1 - XSS") survive it
+
+**Fixed** (earlier in 0.3.0 development)
 - WAF fingerprinting and error-page collection inspected every response passing
   through the HTTP layer, so a firewall on wpvulnerability.net/NVD could be
   reported as the *target's* WAF (found while A/B-testing 0.3.0 against the

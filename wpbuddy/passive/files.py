@@ -156,7 +156,9 @@ def check_robots(report, target):
     # Paths disallowed in robots.txt are prime audit targets: admin panels,
     # staging areas, backups - exactly what the owner wants hidden from Google
     # (after filtering the WordPress/Yoast defaults every site ships).
-    disallowed = sorted(set(re.findall(r"(?im)^disallow:\s*(\S+)", resp.text)))
+    # [ \t]* (not \s*) so an EMPTY 'Disallow:' can't swallow the newline and
+    # capture the next line's first word ("Sitemap:" was once 'interesting').
+    disallowed = sorted(set(re.findall(r"(?im)^disallow:[ \t]*(\S+)", resp.text)))
     interesting = [d for d in disallowed if d.lower() not in BORING_DISALLOWS]
     if interesting:
         report.paragraph("Interesting `Disallow` entries (hidden-but-public paths worth reviewing; "
@@ -346,6 +348,31 @@ def _redirects_into_site(location, target):
         return True  # no Location header at all - treat as unreachable answer
     host = urlsplit(location).hostname or urlsplit(target).hostname
     return host == (urlsplit(target).hostname or "")
+
+
+def check_security_txt(report, target):
+    """RFC 8615 security.txt - a positive finding only when actually published
+    (its absence is the norm on WordPress sites, not worth a bullet).
+
+    Checked at /.well-known/security.txt (canonical) and /security.txt
+    (legacy placement); a 200 that is not a security.txt (soft-404, WAF
+    challenge) is rejected via the shared junk checks.
+    """
+    for path in (".well-known/security.txt", "security.txt"):
+        resp = httpclient.get(target + path, allow_redirects=False)
+        if resp is None or resp.status_code != 200:
+            continue
+        body = resp.text or ""
+        if "contact:" not in body.lower() or response_is_junk(resp, target):
+            continue
+        contacts = re.findall(r"(?im)^contact:\s*(\S+)", body)[:3]
+        print(f"[*] security.txt published at /{path} (responsible disclosure contact)")
+        report.paragraph(f"**security.txt** is published at `{path}` - the site offers "
+                         f"a responsible-disclosure channel"
+                         + (" (" + ", ".join(f"`{c}`" for c in contacts) + ")" if contacts else "")
+                         + ". Good practice: it routes finders to the owner instead "
+                           "of public disclosure.")
+        return
 
 
 def check_setup_wizard(report, target):

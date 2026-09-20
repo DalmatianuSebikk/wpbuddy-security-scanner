@@ -30,8 +30,8 @@ class Report:
         self.doc.add(Paragraph(text) if not isinstance(text, str) else text)
 
     def bullets(self, items):
-        for item in items:
-            self.doc.add(UnorderedList((item,)))
+        if items:
+            self.doc.add(UnorderedList(tuple(items)))
 
     def numbered(self, items):
         for item in items:

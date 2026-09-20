@@ -111,6 +111,10 @@ Examples:
                         help="Gather component code and analyze it locally: auto (listing, then "
                              "wordpress.org), target (only exposed listings), source (only "
                              "wordpress.org, never touches the target), off (default: %(default)s)")
+    parser.add_argument("--source-dir", metavar="DIR",
+                        help="Directory of operator-provided component archives for code the "
+                             "audit cannot download (commercial plugins, custom themes): "
+                             "named {kind}-{slug}-{version}.zip or {slug}-{version}.zip")
     parser.add_argument("--version", action="version", version=f"WpBuddy {__version__}")
     return parser
 

@@ -50,19 +50,27 @@ def run(report, target, passive_results, args):
     workdir = Path("wpbuddy-audit") / host
     audited = {}
     pack_entries = []
+    unaudited = []
+    source_dir = getattr(args, "source_dir", None)
 
     for kind, components in (("plugin", passive_results.get("plugins", {})),
                              ("theme", passive_results.get("themes", {}))):
         for slug, version in components.items():
             label = f"{kind} {slug}" + (f" {version}" if version else "")
-            path = workdir / f"{kind}-{slug}"
-            if path.exists():
+            # cache directory includes the VERSION: a cached download of 2.1
+            # must never be audited and reported as the 2.4 running now
+            path = workdir / f"{kind}-{slug}-{version}" if version else \
+                workdir / f"{kind}-{slug}-unknown"
+            if version and path.exists():
                 source = path
-                origin = "cached from a previous scan"
+                origin = f"cached from a previous scan ({version})"
             else:
-                source, origin = _gather(mode, kind, slug, version, target, path)
-            if source is None:
-                continue
+                source, origin, reason = _gather(mode, kind, slug, version, target, path,
+                                                 source_dir=source_dir)
+                if source is None:
+                    if reason:
+                        unaudited.append((label, reason))
+                    continue
             findings = analyzer.analyze(source)
             mirrored = "mirrored" in origin
             if getattr(args, "verify_pocs", False) and findings:
@@ -80,6 +88,13 @@ def run(report, target, passive_results, args):
                          "versions detected). Passive + database findings still apply.")
         return {}
 
+    if unaudited:
+        report.paragraph("Components the audit could NOT gather, and why:")
+        report.bullets([f"**{label}** - {_reason_text(reason)}"
+                        for label, reason in unaudited])
+        report.paragraph("Provide a licensed copy as `<kind>-<slug>-<version>.zip` via "
+                         "`--source-dir DIR` to audit anything in the first two buckets.")
+
     report.paragraph(f"Gathered sources and raw findings are kept under `{workdir.resolve()}` "
                      f"for manual review.")
     if pack_entries:
@@ -93,23 +108,39 @@ def run(report, target, passive_results, args):
     return audited
 
 
-def _gather(mode, kind, slug, version, target, path):
-    """Returns (local_path or None, origin_description)."""
+def _gather(mode, kind, slug, version, target, path, source_dir=None):
+    """Returns (local_path or None, origin or None, failure_reason or None)."""
     if mode in ("auto", "target"):
         listing = f"{target}wp-content/{kind}s/{slug}/"
         source = gather.gather_from_target(listing, path / "target")
         if source:
             print(f"[!] Mirrored {kind} '{slug}' source via directory listing (this is a finding!)")
-            return source, "**mirrored from the target's exposed directory listing**"
+            return source, "**mirrored from the target's exposed directory listing**", None
 
     if mode in ("auto", "source"):
-        source = gather.gather_from_wordpress(kind, slug, version, path / "official")
+        source, origin, reason = gather.gather_from_wordpress(
+            kind, slug, version, path / "official", source_dir=source_dir)
         if source:
-            print(f"[*] Downloaded {kind} '{slug}' {version} from wordpress.org for local audit")
-            return source, f"official wordpress.org distribution, version {version} (exact match)"
+            print(f"[*] Gathered {kind} '{slug}' {version}: {origin}")
+            return source, origin, None
+        print(f"[*] Could not gather {kind} '{slug}' {version}: {reason}")
+        return None, None, reason
+    return None, None, None
 
-    print(f"[*] Could not gather code for {kind} '{slug}'")
-    return None, None
+
+_GATHER_REASONS = {
+    "no-version": "version unknown (readme not readable) - no exact code to fetch",
+    "not-hosted": "not distributed on wordpress.org - a commercial or custom "
+                  "component; licensed copies are the only legitimate source",
+    "version-not-published": "wordpress.org hosts it, but not this exact version "
+                             "(older releases are pruned from the directory)",
+    "download-failed": "download failed (network or CDN error)",
+    "bad-archive": "the downloaded archive could not be extracted",
+}
+
+
+def _reason_text(reason):
+    return _GATHER_REASONS.get(reason, reason or "unknown")
 
 
 def _report_component(report, label, origin, source, findings):
@@ -124,16 +155,25 @@ def _report_component(report, label, origin, source, findings):
         return
 
     report.paragraph(f"Rules matched: {summary}. Details:")
-    listed = findings[:config.MAX_REPORT_FINDINGS]
+    # HIGH and above are listed with evidence; LOW/INFO are review-only noise
+    # (autoloader patterns, interpolation reviews) and would bury them - a
+    # count line plus the grep-able sources on disk is the honest summary.
+    notable_severities = ("CRITICAL", "HIGH", "MEDIUM")
+    notable = [f for f in findings if f["severity"] in notable_severities]
+    listed = notable[:config.MAX_REPORT_FINDINGS]
     for f in listed:
         line = (f"[{f['severity']}] **{f['rule']}** - {f['description']} "
                 f"(`{f['file']}:{f['line']}`)")
         if f.get("poc", {}).get("verified"):
             line += " - **PoC VERIFIED on the target**"
         report.bullets([line])
-    if len(findings) > len(listed):
-        report.paragraph(f"...and {len(findings) - len(listed)} more findings of the same rules "
+    if len(notable) > len(listed):
+        report.paragraph(f"...and {len(notable) - len(listed)} more notable findings "
                          f"(see the gathered sources under the audit directory).")
+    review_only = len(findings) - len(notable)
+    if review_only:
+        report.paragraph(f"{review_only} LOW/INFO review-only matches omitted from this "
+                         f"list - grep them in `{source}` under the audit directory.")
 
     verified = [f for f in findings if f.get("poc", {}).get("verified")]
     if verified:

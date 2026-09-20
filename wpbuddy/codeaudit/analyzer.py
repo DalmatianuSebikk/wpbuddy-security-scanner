@@ -34,6 +34,30 @@ PARAM_RE = re.compile(r"\$_(?:GET|POST|REQUEST|COOKIE)\s*\[\s*['\"]([\w\-]+)['\"
 # Files that define classes WordPress *includes* but never routes to directly
 NOT_ENDPOINT_BASENAME = re.compile(r"(?:^class-|\.cls\.php$|\.trait\.php$|^abstract-|^interface-)", re.I)
 
+# Content-based endpoint detection (naming conventions miss PSR-4 layouts):
+# a file IS routable when it registers hooks/menus/routes itself; a file that
+# only declares a class/trait/interface/namespace and hooks nothing is
+# autoloaded definition code - its nonce checks live in the dispatcher.
+_HOOK_RE = re.compile(r"\b(?:add_action|add_filter|add_shortcode|add_menu_page|"
+                      r"add_submenu_page|register_rest_route|register_activation_hook)\s*\(")
+_TYPE_DECL_RE = re.compile(r"(?m)^\s*(?:abstract\s+|final\s+)?(?:class|trait|interface)\s+\w")
+_NAMESPACE_RE = re.compile(r"(?m)^\s*namespace\s+\w")
+
+# Bundled third-party / test code: real matches, but not plugin-author code -
+# demoted one severity level and labelled so it can't outrank the author's own.
+_VENDOR_PATH_RE = re.compile(r"(?:^|/)(?:vendor|vendor_prefixed|node_modules|bower_components)(?:/|$)", re.I)
+_TEST_PATH_RE = re.compile(r"(?:^|/)(?:tests?|spec)(?:/|$)|(?:-test|Test)\.php$", re.I)
+
+
+def _is_endpoint_file(lines):
+    """True when the file looks directly routable by WordPress."""
+    code = "\n".join(code_view(line) for line in lines)
+    if _HOOK_RE.search(code):
+        return True
+    if _TYPE_DECL_RE.search(code) or _NAMESPACE_RE.search(code):
+        return False
+    return True  # plain procedural file: give it the heuristic look
+
 _SINGLE_QUOTED = re.compile(r"'(?:\\.|[^'\\])*'")
 _LINE_COMMENT = re.compile(r"(//|#).*$")
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
@@ -134,10 +158,13 @@ AJAX_ACTION_RE = re.compile(
     r"add_action\s*\(\s*['\"]((?:wp_ajax(?:_nopriv)?|admin_post|admin_action)_[\w-]+)['\"]"
     r"\s*,\s*['\"](\w+)['\"]")
 AUTH_CHECK_RE = re.compile(
-    r"current_user_can|wp_verify_nonce|check_ajax_referer|check_admin_referer")
+    r"current_user_can|wp_verify_nonce|check_ajax_referer|check_admin_referer|verify_nonce")
+# 'verify_nonce' (bare) accepts framework wrappers like WPSEO_Utils::verify_nonce().
 # NB: is_admin() is deliberately NOT in that list - it checks whether the
 # request is in /wp-admin context, NOT the user's capabilities, and is a
 # classic non-authorization check to hide behind.
+_FUNC_DEF_RE = re.compile(r"function\s+(\w+)\s*\(")
+_CALL_RE = re.compile(r"\b([a-zA-Z_]\w*)\s*\(")
 
 
 def analyze(root):
@@ -182,10 +209,25 @@ def _scan_file(rel, lines, rules):
                 findings.append(_finding(severity, rule_id, description, rel, lineno, stripped))
                 per_rule_counts[rule_id] = per_rule_counts.get(rule_id, 0) + 1
 
-    if not NOT_ENDPOINT_BASENAME.search(Path(rel).name):
+    if not NOT_ENDPOINT_BASENAME.search(Path(rel).name) and _is_endpoint_file(lines):
         findings.extend(_scan_file_heuristics(rel, lines))
     findings.extend(_scan_ajax_auth(rel, lines))
+
+    for finding in findings:
+        _demote_bundled_code(finding)
     return findings
+
+
+def _demote_bundled_code(finding):
+    """Vendor/test-path matches are one step less severe - bundled framework
+    code (Twig's eval, PHPUnit helpers) is worth knowing, not worth billing
+    as the plugin's own HIGH."""
+    if not (_VENDOR_PATH_RE.search(finding["file"]) or _TEST_PATH_RE.search(finding["file"])):
+        return
+    order = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+    if finding["severity"] in order:
+        finding["severity"] = order[min(order.index(finding["severity"]) + 1, len(order) - 1)]
+    finding["description"] += " [in bundled vendor/test code - not plugin-author code]"
 
 
 def _scan_ajax_auth(rel, lines):
@@ -193,10 +235,15 @@ def _scan_ajax_auth(rel, lines):
     or nonce check. Two passes over the file (the 'join'): collect the
     add_action() registrations, then locate each named callback's body.
 
+    One hop of same-file delegation is followed: a thin wrapper that calls
+    save_what(), where save_what() does check_ajax_referer(), is NOT a
+    finding (real Yoast pattern that once tripped this rule).
+
     Severity: wp_ajax_nopriv_* handlers are callable UNAUTHENTICATED (HIGH);
     plain wp_ajax_*/admin_post_* need only a logged-in Subscriber (MEDIUM).
     """
     code_lines = [code_view(line) for line in lines]
+    defined = set(_FUNC_DEF_RE.findall("\n".join(code_lines)))
     findings = []
     # registrations are matched on the RAW line: the action/callback names
     # live inside single-quoted strings, which code_view blanks
@@ -206,6 +253,11 @@ def _scan_ajax_auth(rel, lines):
             body = _function_body(code_lines, callback)
             if body is None or AUTH_CHECK_RE.search(body):
                 continue
+            callees = {c for c in _CALL_RE.findall(body)
+                       if c in defined and c != callback}
+            if any(AUTH_CHECK_RE.search(_function_body(code_lines, c) or "")
+                   for c in callees):
+                continue  # the check lives one hop away
             unauthenticated = "nopriv" in action
             findings.append(_finding(
                 "HIGH" if unauthenticated else "MEDIUM",

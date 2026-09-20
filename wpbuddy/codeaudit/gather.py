@@ -14,6 +14,7 @@ The downloaded code is then inspected locally by wpbuddy.codeaudit.analyzer.
 
 import io
 import posixpath
+import re
 import zipfile
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlsplit
@@ -22,9 +23,16 @@ from xml.sax.saxutils import unescape
 from bs4 import BeautifulSoup
 
 from .. import config, httpclient
+from ..versioning import compare_versions
 
 DOWNLOAD_EXTENSIONS = {".php", ".inc", ".js", ".txt", ".md", ".html", ".css", ".json"}
 MAX_DEPTH = 3
+
+# wordpress.org info APIs: authoritative per-version download links
+API_INFO = {
+    "plugin": "https://api.wordpress.org/plugins/info/1.2/",
+    "theme": "https://api.wordpress.org/themes/info/1.2/",
+}
 
 
 def gather_from_target(listing_url, dest, max_files=config.MAX_AUDIT_FILES):
@@ -83,22 +91,130 @@ def _listing_entries(html, dir_url):
     return entries
 
 
-def gather_from_wordpress(kind, slug, version, dest):
-    """Download the exact plugin/theme version from the official wordpress.org
-    distribution. `kind` is 'plugin' or 'theme'. Returns dest or None."""
+def gather_from_wordpress(kind, slug, version, dest, source_dir=None):
+    """Get the EXACT version's source for a component, trying several ways.
+
+    Resolution order:
+    1. operator-provided archive in source_dir ({kind}-{slug}-{version}.zip
+       or {slug}-{version}.zip) - the only legitimate source for commercial
+       plugins and custom code
+    2. the wordpress.org info API's per-version download links (kills
+       URL-naming edge cases and says definitively when a component is not
+       hosted there at all)
+    3. the classic direct-URL guess as a fallback
+
+    Every successful extraction is version-VERIFIED (the archive's own
+    Version:/Stable tag header must match); a mismatch is audited anyway but
+    loudly labelled. Returns (dest or None, origin or None, reason or None).
+    """
     if not version:
-        return None
+        return None, None, "no-version"
+
+    if source_dir:
+        archive = _operator_zip(source_dir, kind, slug, version)
+        if archive is not None:
+            return _use_archive(archive, dest, kind, slug, version,
+                                f"operator-provided archive ({archive.name})")
+
+    link, note = _api_download_link(kind, slug, version)
+    if link is not None:
+        resp = httpclient.get(link)
+        if resp is not None and resp.status_code == 200:
+            origin = f"official wordpress.org distribution, version {version}"
+            if note:
+                origin += f" ({note})"
+            return _use_archive(io.BytesIO(resp.content), dest, kind, slug, version, origin)
+        return None, None, "download-failed"   # the authoritative link didn't serve
+
+    if note == "not-hosted":
+        return None, None, "not-hosted"        # definitive - don't guess URLs
+
+    # API unreachable, or the exact version not yet listed (the API lags the
+    # CDN on brand-new releases): try the classic direct-URL guess.
     url = f"https://downloads.wordpress.org/{kind}/{slug}.{version}.zip"
     resp = httpclient.get(url)
-    if resp is None or resp.status_code != 200:
-        print(f"[!] Could not download {slug} {version} from wordpress.org")
-        return None
+    if resp is not None and resp.status_code == 200:
+        return _use_archive(io.BytesIO(resp.content), dest, kind, slug, version,
+                            f"official wordpress.org distribution, version {version}")
+    return None, None, "version-not-published" if note == "version-not-published" \
+        else "download-failed"
+
+
+def _operator_zip(source_dir, kind, slug, version):
+    """Exact operator-provided archive for this component version, or None.
+
+    Near-misses (right slug, wrong version) are called out on the console so
+    stale drops in the directory don't look like scanner failures.
+    """
+    directory = Path(source_dir)
+    for name in (f"{kind}-{slug}-{version}.zip", f"{slug}-{version}.zip"):
+        if (directory / name).is_file():
+            return directory / name
+    for candidate in directory.glob(f"*{slug}*.zip"):
+        print(f"[!] --source-dir has {candidate.name} but the scan needs "
+              f"{kind} {slug} version {version} - not using it")
+    return None
+
+
+def _api_download_link(kind, slug, version):
+    """(download_url or None, note) from the wordpress.org info API.
+
+    note: '' (exact hit), 'matched published X.Y.Z' (zero-padding match),
+    'not-hosted', or 'version-not-published' (older releases get pruned).
+    """
+    payload = httpclient.get_json(API_INFO[kind], retries=1, params={
+        "action": f"{kind}_information", "request[slug]": slug})
+    if payload is None:
+        return None, "api-unreachable"   # network/JSON failure: fall back to URL guess
+    if not isinstance(payload, dict) or payload.get("error"):
+        return None, "not-hosted"
+    versions = payload.get("versions") or {}
+    if version in versions:
+        return versions[version], ""
+    wanted = _normalized(version)
+    for published, link in versions.items():
+        if _normalized(published) == wanted:
+            return link, f"matched published {published}"
+    return None, "version-not-published"
+
+
+def _normalized(version):
+    parts = [p for p in str(version).lstrip("vV").split(".") if p]
+    while len(parts) < 3:
+        parts.append("0")
+    return ".".join(parts)
+
+
+def _use_archive(archive, dest, kind, slug, version, origin):
+    """Extract, verify the archive's self-reported version, label mismatches."""
     try:
-        safe_extract_zip(io.BytesIO(resp.content), dest)
+        safe_extract_zip(archive, dest)
     except (zipfile.BadZipFile, OSError) as e:
-        print(f"[!] Bad zip for {slug} {version}: {e}")
-        return None
-    return dest
+        print(f"[!] Bad archive for {slug} {version}: {e}")
+        return None, None, "bad-archive"
+    found = _extracted_version(dest, kind, slug)
+    if found and compare_versions(found, version) != 0:
+        origin += f" - WARNING: archive self-reports {found}, expected {version}"
+        print(f"[!] {slug}: archive self-reports version {found}, "
+              f"expected {version} - audit results are suspect")
+    return dest, origin, None
+
+
+def _extracted_version(dest, kind, slug):
+    """The version the extracted archive declares about itself, or None."""
+    dest = Path(dest)
+    primary = f"{slug}.php" if kind == "plugin" else "style.css"
+    for pattern in (primary, "readme.txt"):
+        for path in sorted(dest.rglob(pattern)):
+            try:
+                head = path.read_text(encoding="utf-8", errors="replace")[:8192]
+            except OSError:
+                continue
+            match = re.search(r"(?mi)^\s*(?:\*\s*)?(?:Version|Stable tag):"
+                              r"\s*([0-9][\w.\-]*)", head)
+            if match:
+                return match.group(1)
+    return None
 
 
 def safe_extract_zip(zfile_like, dest):

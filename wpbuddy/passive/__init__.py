@@ -38,6 +38,7 @@ def run(report, target, args, model=None):
     results["themes"] = _scan_themes(report, target, model)
     _scan_rest(report, target, namespaces)
     files.check_robots(report, target)
+    files.check_security_txt(report, target)
     files.check_sensitive_files(report, target)
     files.check_setup_wizard(report, target)
     files.check_headers(report, target)
@@ -167,6 +168,7 @@ def _scan_plugins(report, target, args, namespaces, model, pages, refs, artifact
                   if not v and s not in confirmed_no_version and s in refs["plugins"]]
 
     report.section("Plugin vulnerability analysis (wpvulnerability.net)")
+    clean = []
     for slug, version in versions.items():
         if not version:
             continue
@@ -174,14 +176,13 @@ def _scan_plugins(report, target, args, namespaces, model, pages, refs, artifact
             confidence.score(presence[slug], version_kind=version_kinds[slug]))
         vulns = vulndb.plugin_vulnerabilities(slug)
         if vulns is None:
-            report.paragraph(f"**{slug}** {version} {confidence.label(tier)} (readme verified on "
-                             f"target) - not present in the vulnerability database (not a "
-                             f"wordpress.org slug or simply unresearched).")
+            report.paragraph(f"**{slug}** {version} {confidence.label(tier)} (version from "
+                             f"the target's readme.txt) - not present in the vulnerability "
+                             f"database (not a wordpress.org slug or simply unresearched).")
             continue
-        affected = vulndb.affected_vulnerabilities(version, vulns)
+        affected = vulndb.affected_vulnerabilities(version, vulns, slug=slug)
         if not affected:
-            report.paragraph(f"**{slug}** {version} {confidence.label(tier)} (readme verified on "
-                             f"target) - no known vulnerabilities affect this version.")
+            clean.append(f"**{slug}** {version}")
             continue
         print(f"[!] {len(affected)} vulnerabilities affect {slug} {version}")
         report.paragraph(f"**{slug}** {version} {confidence.label(tier)} is affected by:")
@@ -192,6 +193,11 @@ def _scan_plugins(report, target, args, namespaces, model, pages, refs, artifact
                 "score": confidence.score(presence[slug], version_kind=version_kinds[slug],
                                           operator_basis=v.get("basis"))})
         report.paragraph(f"**Recommendation:** update **{slug}** to its latest version.")
+
+    if clean:
+        report.paragraph("No known vulnerabilities affect these versions (each version "
+                         "read from the component's own readme.txt on the target): "
+                         + ", ".join(sorted(clean)) + ".")
 
     if confirmed_no_version:
         report.paragraph("Present on the target but version unknown "
@@ -240,7 +246,7 @@ def _scan_themes(report, target, model):
             if vulns is None:
                 report.paragraph(f"**{slug}** - not present in the vulnerability database.")
             else:
-                affected = vulndb.affected_vulnerabilities(version, vulns)
+                affected = vulndb.affected_vulnerabilities(version, vulns, slug=slug)
                 if affected:
                     print(f"[!] {len(affected)} vulnerabilities affect theme {slug} {version}")
                     report.paragraph(f"Theme **{slug}** {version} is affected by:")
@@ -265,8 +271,8 @@ def _scan_rest(report, target, namespaces):
         return
     if namespaces:
         print(f"[*] Plugin REST namespaces exposed: {', '.join(namespaces)}")
-        report.paragraph("Plugins registering their own REST routes (fingerprint via /wp-json/):")
-        report.bullets(namespaces)
+        report.paragraph("Plugins registering their own REST routes (fingerprint via "
+                         "/wp-json/): " + ", ".join(f"`{ns}`" for ns in namespaces))
     else:
         report.paragraph("REST API is enabled but exposes only core namespaces.")
 
@@ -277,8 +283,14 @@ def _format_vuln(v, tier_label=None):
         text += f" {tier_label}"
     if v.get("severity"):
         text += f" (CVSS {v['severity']})"
-    if v["description"]:
-        text += f": {v['description']}"
+    # descriptions arrive as multi-paragraph prose; one line, capped, keeps
+    # the finding a bullet instead of breaking the list apart
+    description = (v.get("description") or "").strip()
+    if description:
+        first = description.splitlines()[0].strip()
+        if len(first) > 200:
+            first = first[:197] + "..."
+        text += f": {first}"
     basis = {"bounded": "version range matched",
              "unfixed": "listed as unfixed - affects all versions",
              "assumed": "NO version range recorded - applicability assumed",
