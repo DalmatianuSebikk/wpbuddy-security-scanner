@@ -32,19 +32,46 @@ python main.py --target https://example.com/ --audit-code source             # a
 python main.py --target https://example.com/ --user admin                    # + credential testing (wp-login)
 python main.py --target https://example.com/ --user admin --via-xmlrpc       # + credential testing (system.multicall)
 python main.py --target https://example.com/ --enum-plugins --verify-pocs    # + slug brute-force + live PoCs
+python main.py --target https://example.com/ --json                          # + machine-readable knowledge graph
 ```
 
 Full options: `python main.py --help`
 
 | Phase | What it does |
 |---|---|
-| **Passive** (GET-only, stealthy) | core version (meta generator / core CSS `?ver=` / RSS / readme.html), plugin+theme discovery across crawled pages (sitemap-aware; **same-site references only** - third-party `wp-content` URLs in page content are filtered out as false positives), **content fingerprinting** (shortcodes, body classes, JS globals, cookies, headers, REST namespaces - catches plugins that leave no URL traces), version crawling from readme.txt / style.css (a readable readme on the target = proof of installation), vulnerability matching via wpvulnerability.net, REST `/wp-json/` namespace fingerprinting, robots.txt review, sensitive-file exposure (soft-404-aware, content-signature verified), missing security headers, **error-page analysis** (5xx/PHP fatals collected across all phases: server paths, plugins/themes in stack traces, visible security layers) |
-| **Active** | user enumeration (REST collection -> per-id `?rest_route=` -> `?author=` redirects), XML-RPC probe (`system.listMethods`, flags `pingback.ping`/`system.multicall`), **plugin slug brute-force** (`--enum-plugins`, uses the live wordpress.org popular ranking, probes `wp-content/plugins/<slug>/readme.txt`) |
+| **Passive** (GET-only, stealthy) | core version (**all sources collected and cross-checked**: meta generator / core CSS `?ver=` / RSS / readme.html - agreeing sources corroborate, disagreeing ones are reported as a discrepancy), plugin+theme discovery across crawled pages (sitemap-aware; **same-site references only** - third-party `wp-content` URLs in page content are filtered out as false positives, multi-part suffixes like `.co.uk` handled correctly), **content fingerprinting** (shortcodes, body classes, JS globals, cookies, headers, REST namespaces - catches plugins that leave no URL traces), version crawling from readme.txt / style.css (a readable readme on the target = proof of installation; soft-404/challenge pages are rejected before any version regex runs), vulnerability matching via wpvulnerability.net **with confidence tiers on every finding**, REST `/wp-json/` namespace fingerprinting, robots.txt review, sensitive-file exposure (soft-404- and WAF-challenge-aware, content-signature verified), missing security headers, **error-page analysis** (5xx/PHP fatals collected across all phases: server paths, plugins/themes in stack traces, visible security layers) |
+| **Active** | user enumeration (REST collection -> per-id `?rest_route=` -> `?author=` redirects), XML-RPC probe (`system.listMethods`, flags `pingback.ping`/`system.multicall`), **plugin slug brute-force** (`--enum-plugins`, uses the live wordpress.org popular ranking, probes `wp-content/plugins/<slug>/readme.txt`; a blanket-deny probe runs first so a WAF 403ing the whole path class can't make every slug look installed) |
 | **Access assessment** (`--access` / `--user`) | quiet alternatives to brute force: open-registration check (if registration is open, that *is* access), login-error differential to confirm which usernames are real, then a **targeted password spray** - a dozen high-probability candidates (target-derived `{host}{year}!` templates + top leaked passwords), one attempt per user per round, staying under lockout thresholds. `--via-xmlrpc` folds an entire spray round (N users) into ONE `system.multicall` request. The loud full-dictionary path still exists behind `--dict` |
 | **Code audit** | mirrors component source from exposed directory listings (itself a finding) or downloads the exact detected version from the official wordpress.org distribution (never touches the target), then runs a pattern-based PHP analyzer (webshell patterns, SQLi, command exec, file inclusion, SSRF, reflected XSS, missing nonces). With `--verify-pocs`, findings become evidence: safely-testable rules are **reproduced live on the target** with benign payloads (reflected-XSS marker, harmless LFI file, error-based SQL probe). Every exploitable finding is written to a **Burp-ready PoC pack** |
 
 The report is written as Markdown (default `outputScan.md`); gathered sources and audit
-evidence land in `wpbuddy-audit/<host>/` for manual review.
+evidence land in `wpbuddy-audit/<host>/` for manual review. With `--json`, the scan also
+produces `<output>.json` - a knowledge graph of the site (see below).
+
+## Confidence model
+
+Every finding is only as good as its weakest evidence link, so nothing is reported as
+bare fact. Each version and vulnerability carries an earned **confidence tier**:
+
+| Tier | Meaning | Typical evidence |
+|---|---|---|
+| **CONFIRMED** (>= 80/100) | multiple independent sources agree, or content was verified on the target | readable readme + fingerprint + explicit `Stable tag:` + advisory with a matched version range |
+| **LIKELY** (>= 55) | one strong source | `meta generator` tag, enumeration 200 |
+| **UNVERIFIED** (>= 20) | heuristic lead - review before acting on it | content fingerprint alone, page reference |
+| **ASSUMED** (< 20) | the scanner defaulted because data was missing | advisory with **no version range recorded** - applicability assumed |
+
+The score combines three chained links: **presence** (how the component was found:
+enumeration > readme readable > error-page trace > fingerprint > page reference > manual
+list), **version provenance** (explicit `Stable tag:` > theme style.css > number scraped
+near a changelog anchor) and **applicability** (the advisory's real version range vs an
+"assumed" default). Core-version sources are cross-checked: agreement corroborates,
+disagreement (stale cache, unpatched readme.html) is flagged in the report.
+
+With `--json` the same facts leave the scanner as a machine-readable graph: nodes for
+components (with their evidence sources, versions, scores) and vulnerabilities (with
+severity and applicability basis), edges for `site runs component` and
+`component affected-by vulnerability` - ready for post-scan tooling, diffing scans over
+time, or importing into your reporting stack.
 
 ## Burp Suite workflow
 
@@ -85,13 +112,22 @@ WAF rules actually catch quiet scanners.
 
 The scanner fingerprints the firewall layer passively (Cloudflare, Wordfence, Sucuri,
 ModSecurity, AWS WAF, Imperva, LiteSpeed - from headers, cookies and block pages) and
-reports it in a dedicated section. When a probe is blocked (403/406/429/501), the
-request is retried through a ladder of path-obfuscation variants (`/./`, `//`,
-percent-encoded slashes, case variation, `;` segment params) - only after the plain
-request failed, so unfiltered targets pay nothing, and the report records which
-technique got through. 429 rate-limiting triggers an automatic back-off. Disable the
-fallback with `--no-evade`. This exists to test whether a WAF provides prevention or
-just detection - a WAF that falls to path normalization needs tuning.
+reports it in a dedicated section. It also recognizes WAF **challenge interstitials
+served with HTTP 200** ("One moment, please..."-style pages): they are matched against
+the site's not-found signature and error/challenge markers, so a challenge in front of
+every URL becomes "findings unreliable" instead of nine false exposures.
+
+When a probe is blocked (403/406/501), the request is retried through a ladder of
+path-obfuscation variants (`/./`, `//`, percent-encoded slashes, case variation, `;`
+segment params) - only after the plain request failed, so unfiltered targets pay
+nothing, and only variants that returned a *real* answer count as a bypass in the
+report. A 429 is never answered with more probes: it arms a scan-wide cool-down that
+escalates (5s -> 10s -> 20s..., capped at 60s, `Retry-After` honoured) until any
+successful response resets it - being rate-limited makes the scanner quieter, not
+louder. If the network fails repeatedly, later requests drop to single attempts until
+the target answers again. Disable the path fallback with `--no-evade`. This exists to
+test whether a WAF provides prevention or just detection - a WAF that falls to path
+normalization needs tuning.
 
 ## Project layout
 
@@ -120,6 +156,71 @@ python tests/mockwp_server.py   # standalone mock site for manual testing on :87
 The mock site in `tests/fixtures/mockwp/` implements a WordPress-flavoured homepage,
 sitemap, REST API, `?author=` redirects, wp-login.php and xmlrpc.php - enough to
 exercise the whole pipeline without touching a real target.
+
+## Changelog
+
+### v0.2.0
+
+Complete restructure of the initial flat-script scanner into the `wpbuddy/` package,
+plus an offline test suite and a confidence layer that labels every finding with how
+it is actually known.
+
+**Added**
+- **Confidence model** (`wpbuddy/confidence.py`): evidence-scored tiers
+  (CONFIRMED / LIKELY / UNVERIFIED / ASSUMED) on every version and vulnerability,
+  combining presence evidence, version provenance and advisory applicability;
+  core-version **corroboration** (all sources collected, agreement boosts,
+  disagreement flagged as a stale-cache/honeypot signal); advisory **applicability
+  basis** rendered per CVE ("version range matched" vs "no range recorded -
+  applicability assumed"); `--json` exports the scan as a **knowledge graph**
+  (components, evidence, vulnerabilities as nodes/edges).
+- **Covert mode** (`--covert`, `--persona`, `--jitter`): browser personas with
+  correctly-ordered header sets, optional curl_cffi TLS/HTTP2 impersonation,
+  human-like jitter pacing, referer chains, shuffled slug probing.
+- **WAF awareness** (`waf.py`): passive firewall fingerprinting from headers,
+  cookies and block pages, block detection and bypass accounting; path-obfuscation
+  fallback (`obfuscate.py`) that only fires after a plain request was blocked.
+- **Access assessment** (`--access` / `--user`): open-registration check,
+  login-error user validation, targeted password spray (one attempt per user per
+  round), `--via-xmlrpc` multicall spray, loud full-dictionary path behind `--dict`.
+- **Code audit phase** (`--audit-code`, `--verify-pocs`): mirror component source
+  from exposed listings or download the exact version from wordpress.org, local
+  pattern-based PHP analyzer with false-positive controls, live PoC verification
+  with benign payloads, Burp-ready PoC pack.
+- **Plugin slug enumeration** (`--enum-plugins`): live wordpress.org popular
+  ranking, obfuscation-aware probing.
+- Offline test suite: 66 pytest tests against a local mock WordPress site
+  (including a simulated WAF that blocks plain readme probes).
+
+**Fixed**
+- WAF **challenge pages served with HTTP 200** (Cloudflare "One moment, please...")
+  no longer produce false "possible exposure" findings on every sensitive file, and
+  robots.txt no longer dumps the challenge page as its content (error/challenge
+  markers + a soft-404 baseline whose length tolerance scales with page size).
+- **Phantom plugin versions / phantom CVEs**: readme responses are checked against
+  the site's not-found signature before any version regex runs, and
+  "Requires PHP 7.4" / "Tested up to WordPress 6.0" lines are no longer misread as
+  the component's version.
+- `--enum-plugins` counted a blanket WAF 403 as "plugin installed" - a bogus-slug
+  probe now runs first, and only real 200 answers count when the path class is
+  denied wholesale.
+- **429 rate-limiting** triggered the 5-variant evasion ladder; it now arms an
+  escalating scan-wide cool-down (Retry-After honoured) instead.
+- The promised "continuing with single attempts" circuit breaker after repeated
+  network failures is now actually implemented.
+- Password sprays stop when wp-login.php / xmlrpc.php becomes unreachable instead
+  of grinding every remaining user and round.
+- XML-RPC `system.multicall` parser aligned results with a single regex and
+  silently discarded found credentials on real WordPress (mixed success/fault
+  batches); it now walks per-call items, and the mock server speaks the real
+  WordPress fault shape.
+- Same-site reference check treated every `*.co.uk` host as the target's own site
+  (last-two-labels registrable-domain heuristic); multi-part public suffixes are
+  handled.
+
+### v0.1.0
+
+Initial upload: flat-script scanner (passive/active scan, credential testing).
 
 ## Credits
 - Vulnerability data: [wpvulnerability.net](https://www.wpvulnerability.net) open API
