@@ -20,6 +20,12 @@ PERSONA = None            # browser persona for the whole scan (set by init_netw
 HTTP_BACKEND = "requests"  # or "curl_cffi" when impersonation is active
 EVADE = True              # retry WAF-blocked probes through path obfuscation (--no-evade)
 
+# Hostname of the scan target (set by the CLI). Passive collectors (WAF
+# fingerprinting, error pages) only trust responses from THIS host - a
+# firewall on wpvulnerability.net or NVD must never be reported as the
+# target's.
+TARGET_HOST = None
+
 # Passive crawling
 MAX_CRAWL_PAGES = 5
 

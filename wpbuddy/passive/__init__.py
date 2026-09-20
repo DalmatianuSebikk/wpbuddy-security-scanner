@@ -19,7 +19,7 @@ graph exported with --json).
 """
 
 from .. import config, confidence, vulndb
-from . import content, core_version, files, fingerprints, readme, wprest
+from . import content, core_version, dangling, files, fingerprints, readme, wprest
 
 
 def run(report, target, args, model=None):
@@ -29,14 +29,19 @@ def run(report, target, args, model=None):
     results = {"plugins": {}, "themes": {}}
 
     namespaces = wprest.discover_rest_namespaces(target)
+    # one crawl shared by every consumer (plugin refs, fingerprints, dangling DNS)
+    pages = content.crawl_page_urls(target, args.max_pages)
+    refs, artifacts = content.discover_refs(pages, target)
 
     _scan_core(report, target, model)
-    results["plugins"] = _scan_plugins(report, target, args, namespaces, model)
+    results["plugins"] = _scan_plugins(report, target, args, namespaces, model, pages, refs, artifacts)
     results["themes"] = _scan_themes(report, target, model)
     _scan_rest(report, target, namespaces)
     files.check_robots(report, target)
     files.check_sensitive_files(report, target)
+    files.check_setup_wizard(report, target)
     files.check_headers(report, target)
+    dangling.check(report, target, artifacts.get("pages_html", ""))
     return results
 
 
@@ -74,6 +79,7 @@ def _scan_core(report, target, model):
                      "(includes issues fixed in later releases - the site is only patched by updating):")
 
     vulns = vulndb.affected_vulnerabilities(version, vulndb.core_vulnerabilities(version))
+    vulns = vulndb.enrich_core_with_nvd(version, vulns)
     if not vulns:
         report.paragraph("No known vulnerabilities in the wpvulnerability.net database for this version.")
         return
@@ -97,11 +103,8 @@ def _vuln_tier(presence, vuln, version_kind=None):
     return confidence.label(value)
 
 
-def _scan_plugins(report, target, args, namespaces, model):
+def _scan_plugins(report, target, args, namespaces, model, pages, refs, artifacts):
     report.section("Plugins")
-    pages = content.crawl_page_urls(target, args.max_pages)
-    refs, artifacts = content.discover_refs(pages, target)
-
     manual = config.load_lines(args.pluginList) if args.pluginList else []
     fingerprinted = fingerprints.detect(artifacts, namespaces)
     discovered = refs["plugins"]
@@ -278,7 +281,11 @@ def _format_vuln(v, tier_label=None):
         text += f": {v['description']}"
     basis = {"bounded": "version range matched",
              "unfixed": "listed as unfixed - affects all versions",
-             "assumed": "NO version range recorded - applicability assumed"}.get(v.get("basis"))
+             "assumed": "NO version range recorded - applicability assumed",
+             "contradicted": "advisory title bounds this BELOW your version - "
+                             "likely already patched, kept for review",
+             "refuted": "NVD version range EXCLUDES your version - likely not affected",
+             }.get(v.get("basis"))
     if basis:
         text += f" ({basis})"
     # the advisory carries the actual exploitation details (vulnerable endpoint,

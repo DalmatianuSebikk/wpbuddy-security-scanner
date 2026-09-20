@@ -112,10 +112,13 @@ WAF rules actually catch quiet scanners.
 
 The scanner fingerprints the firewall layer passively (Cloudflare, Wordfence, Sucuri,
 ModSecurity, AWS WAF, Imperva, LiteSpeed - from headers, cookies and block pages) and
-reports it in a dedicated section. It also recognizes WAF **challenge interstitials
-served with HTTP 200** ("One moment, please..."-style pages): they are matched against
-the site's not-found signature and error/challenge markers, so a challenge in front of
-every URL becomes "findings unreliable" instead of nine false exposures.
+reports it in a dedicated section. Only responses **from the scan target** are
+fingerprinted: the scanner also talks to wpvulnerability.net, NVD and wordpress.org
+through the same HTTP layer, and a firewall on those hosts must never be reported as
+the target's. It also recognizes WAF **challenge interstitials served with HTTP 200**
+("One moment, please..."-style pages): they are matched against the site's not-found
+signature and error/challenge markers, so a challenge in front of every URL becomes
+"findings unreliable" instead of nine false exposures.
 
 When a probe is blocked (403/406/501), the request is retried through a ladder of
 path-obfuscation variants (`/./`, `//`, percent-encoded slashes, case variation, `;`
@@ -158,6 +161,48 @@ sitemap, REST API, `?author=` redirects, wp-login.php and xmlrpc.php - enough to
 exercise the whole pipeline without touching a real target.
 
 ## Changelog
+
+### v0.3.0
+
+Better vulnerability confirmation and recon coverage, inspired by published
+CVE-hunting and bug-hunting workflows.
+
+**Added**
+- **Upstream data hygiene** (wpvulnerability.net serves occasional garbage):
+  advisory names that are really scraped error-page titles ("404 Page Not
+  Found") are replaced by their CVE id; version bounds stated in advisory
+  titles ("<plugin> <= 7.5.0") are cross-checked against the installed
+  version, and a contradiction demotes the finding to a `contradicted` basis
+  ("likely already patched, kept for review").
+- **NVD enrichment for core CVEs**: findings the API gives no version range
+  for ("applicability assumed") are looked up in NVD's CPE criteria - an
+  explicit range turns them `bounded` or `refuted` (never silently dropped).
+  Rate-limited and cached; failures keep the original basis. Set
+  `NVD_API_KEY` to raise the rate limit.
+- **`ajax-handler-no-auth` analyzer rule** (the Claude+Semgrep CVE-hunting
+  join, in two static passes): `wp_ajax_nopriv_*`/`wp_ajax_*`/`admin_post_*`
+  callbacks whose bodies contain no `current_user_can`/nonce check - HIGH
+  when unauthenticated, MEDIUM when a Subscriber suffices. `is_admin()` is
+  deliberately not accepted as authorization (request context, not
+  capabilities).
+- **Wider sensitive-file coverage**: `wp-config.php.old/.orig`, root-level
+  `backup.zip`/`wordpress.zip`/`db.sql` (ZIPs confirmed by magic bytes, not
+  status codes), `phpinfo.php`, `.htpasswd`.
+- **Setup-wizard check**: `wp-admin/setup-config.php` serving the
+  configuration form on a deployed site (config-overwrite/takeover risk);
+  the polite "wp-config.php already exists" answer is recognized as safe.
+- **Dangling external references**: hosts still linked by the crawled pages
+  that no longer resolve in DNS (broken-link-hijacking starting point) -
+  detection only, takeover proving stays with the engagement.
+- REST user enumeration now requests `per_page=100` (the default caps
+  listings at 10 users).
+
+**Fixed**
+- WAF fingerprinting and error-page collection inspected every response passing
+  through the HTTP layer, so a firewall on wpvulnerability.net/NVD could be
+  reported as the *target's* WAF (found while A/B-testing 0.3.0 against the
+  mock: a third-party "Imperva" body triggered a detection). Both collectors
+  now only trust responses from the scan target's host.
 
 ### v0.2.0
 

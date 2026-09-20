@@ -50,9 +50,17 @@ VERSION_WEIGHTS = {
 }
 
 OPERATOR_WEIGHTS = {
-    "bounded": 12,   # explicit min/max range matched the installed version
-    "unfixed": 6,    # advisory states: affects every version
-    "assumed": -20,  # no range recorded - applicability defaulted to 'affected'
+    "bounded": 12,    # explicit min/max range matched the installed version
+    "unfixed": 6,     # advisory states: affects every version
+    "assumed": -20,   # no range recorded - applicability defaulted to 'affected'
+    # the advisory's own title bounds the issue BELOW the installed version
+    # ("<= 7.5.0" while the site runs 7.5.5) while the API flag claims
+    # unfixed/assumed: stale upstream data, site very likely patched. Kept
+    # for review, demoted hard.
+    "contradicted": -55,
+    # NVD's explicit CPE range excludes the installed version: strongest
+    # negative signal available, still kept in the report for review.
+    "refuted": -70,
 }
 
 CORE_WEIGHTS = {

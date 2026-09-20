@@ -43,9 +43,19 @@ _seen = OrderedDict()
 
 
 def inspect(resp):
-    """Called by httpclient for every response; records interesting errors."""
+    """Called by httpclient for every response; records interesting errors.
+
+    Only responses from the scan target are collected - error pages from the
+    vulnerability APIs the scanner also talks to are not the target's.
+    """
+    from .. import config
+    from urllib.parse import urlsplit
     if resp is None:
         return
+    if config.TARGET_HOST:
+        host = (urlsplit(getattr(resp, "url", "") or "").hostname or "").lower()
+        if host and host != config.TARGET_HOST:
+            return
     status = getattr(resp, "status_code", 0) or 0
     body = (resp.text or "")[:MAX_BODY_SCAN]
 

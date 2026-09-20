@@ -12,6 +12,9 @@ code of its own.
 """
 
 import re
+from urllib.parse import urlsplit
+
+from . import config
 
 # name -> ({header-name: value-prefix/regex/None}, cookie-prefixes, body-regex-TUPLES)
 SIGNATURES = {
@@ -43,9 +46,18 @@ _bypass_events = {}   # technique -> occurrences
 
 
 def inspect_response(resp):
-    """Called by httpclient for every response; keeps the fingerprint fresh."""
+    """Called by httpclient for every response; keeps the fingerprint fresh.
+
+    Only responses from the scan target count: the scanner also talks to
+    wpvulnerability.net / NVD / wordpress.org through the same HTTP layer,
+    and a firewall on THOSE hosts must not be reported as the target's.
+    """
     if resp is None:
         return
+    if config.TARGET_HOST:
+        host = (urlsplit(getattr(resp, "url", "") or "").hostname or "").lower()
+        if host and host != config.TARGET_HOST:
+            return
     headers = {k.lower(): (v or "") for k, v in (getattr(resp, "headers", None) or {}).items()}
     cookies = " ".join(getattr(resp, "cookies", None).keys() if getattr(resp, "cookies", None) else [])
     body_head = (resp.text or "")[:4000]

@@ -28,10 +28,13 @@ def discover_rest_namespaces(target):
 def users_via_rest_collection(target):
     """Try GET /wp-json/wp/v2/users (single request).
 
-    Returns a list of (name, slug), [] when accessible but empty, or None when
-    the endpoint is blocked/disabled.
+    `per_page=100` matters: the default caps the listing at 10 users, so
+    larger sites leak only a slice without it. Returns a list of
+    (name, slug), [] when accessible but empty, or None when the endpoint is
+    blocked/disabled.
     """
-    for url in (f"{target}wp-json/wp/v2/users", f"{target}?rest_route=/wp/v2/users"):
+    for url in (f"{target}wp-json/wp/v2/users?per_page=100",
+                f"{target}?rest_route=/wp/v2/users&per_page=100"):
         payload = httpclient.get_json(url)
         if isinstance(payload, list):  # a dict here is an error object
             return [(u.get("name", ""), u.get("slug", "")) for u in payload if isinstance(u, dict)]

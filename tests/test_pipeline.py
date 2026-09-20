@@ -247,6 +247,46 @@ def test_sensitive_files_waf_challenge_200(monkeypatch):
     assert "None of the common sensitive files" in text
 
 
+def test_sensitive_files_backup_archive_magic(monkeypatch):
+    """A 200 backup.zip that really is a ZIP (PK magic) is CONFIRMED, not just
+    'reachable' - an HTML soft-404 with the same name is not."""
+    from wpbuddy import httpclient
+
+    def fake_get(url, **kwargs):
+        if url.endswith("backup.zip"):
+            resp = FakeResp(200, "\u0000binary\u0000")
+            resp.content = b"PK\x03\x04" + b"\x00" * 100   # real ZIP magic bytes
+            return resp
+        if "wpbuddy-" in url:
+            return FakeResp(404)
+        return FakeResp(404)
+
+    monkeypatch.setattr(httpclient, "get", fake_get)
+    report = Report()
+    files.check_sensitive_files(report, "https://site.example.com/")
+    text = report.doc.write()
+    assert "CONFIRMED exposed: `backup.zip`" in text
+    assert "ZIP archive" in text
+
+
+def test_setup_wizard_check(monkeypatch):
+    from wpbuddy import httpclient
+
+    def wizard(body):
+        monkeypatch.setattr(httpclient, "get",
+                            lambda url, **kw: FakeResp(200, body) if "setup-config" in url
+                            else FakeResp(404))
+        report = Report()
+        files.check_setup_wizard(report, "https://site.example.com/")
+        return report.doc.write()
+
+    assert "Setup wizard reachable" in wizard(
+        '<form method="post"><input name="dbname" /><input name="uname" /></form>')
+    # installed site politely refusing: the normal, safe case - no finding
+    assert "Setup wizard reachable" not in wizard(
+        "<p>The file 'wp-config.php' already exists.</p>")
+
+
 def test_sensitive_files_dynamic_page_drift(monkeypatch):
     """Challenge pages that change size every request (ray ids, timestamps) still
     match the baseline: the old +/-48 byte tolerance missed the ~100-byte drift."""
@@ -256,8 +296,10 @@ def test_sensitive_files_dynamic_page_drift(monkeypatch):
     counter = itertools.count()
 
     def fake_get(url, **kwargs):
-        n = next(counter)  # every response slightly bigger, like a real challenge
-        return FakeResp(200, "<html><body>interstitial " + "y" * (12000 + n * 37) + "</body></html>")
+        n = next(counter)
+        # bounded per-request jitter (a few tokens), not unbounded growth
+        jitter = (n % 5) * 40
+        return FakeResp(200, "<html><body>interstitial " + "y" * (12000 + jitter) + "</body></html>")
 
     monkeypatch.setattr(httpclient, "get", fake_get)
     report = Report()
@@ -427,6 +469,23 @@ def test_waf_bypass_not_counted_for_error_pages(monkeypatch):
     assert waf.bypass_events() == {}   # a 404 is not a firewall "win"
 
 
+def test_waf_detection_ignores_third_party_responses(monkeypatch):
+    """A firewall on wpvulnerability.net/NVD (which the scanner also queries)
+    must never be reported as the TARGET's WAF - found by the 0.3.0 mock test."""
+    from wpbuddy import config, waf
+    waf.reset()
+    monkeypatch.setattr(config, "TARGET_HOST", "site.example.com")
+
+    imperva_body = "<html>Request unsuccessful. Incapsula</html>"
+    waf.inspect_response(FakeResp(200, imperva_body, url="https://www.wpvulnerability.net/plugin/x/"))
+    assert waf.detected() == []                       # third-party host: ignored
+
+    waf.inspect_response(FakeResp(200, imperva_body, url="https://site.example.com/page"))
+    assert "Imperva/Incapsula" in waf.detected()      # same host: counted
+    waf.reset()
+    monkeypatch.setattr(config, "TARGET_HOST", None)
+
+
 def test_author_enum_aborts_on_erroring_site(monkeypatch):
     """Author probing must stop after a few consecutive errors, not grind 25 ids."""
     calls = []
@@ -592,7 +651,135 @@ def test_affected_vulnerabilities_dedup():
     assert {v["basis"] for v in affected} == {"bounded"}
 
 
+def test_advisory_junk_names_replaced():
+    """A Wordfence page scraped as '404 Page Not Found' must never be a title."""
+    vulns = [
+        {"operator": {"unfixed": "1"},
+         "source": [{"name": "404 Page Not Found",
+                     "link": "https://www.wordfence.com/threat-intel/vulnerabilities/x/y/z"}]},
+        {"operator": {"unfixed": "1"},
+         "source": [{"name": "Access Denied | Sucuri",
+                     "link": "https://www.cve.org/CVERecord?id=CVE-2026-65498"}]},
+    ]
+    affected = vulndb.affected_vulnerabilities("3.2.0", vulns)
+    names = [v["name"] for v in affected]
+    assert names[0].startswith("Unnamed advisory")   # no CVE in the link -> placeholder
+    assert names[1] == "CVE-2026-65498 (advisory title unreadable)"
+
+
+def test_advisory_title_contradiction_demotes():
+    """The Complianz false positive: 'unfixed' flag vs title saying '<= 7.5.0'
+    while the site runs 7.5.5 - demoted to 'contradicted', not dropped."""
+    vulns = [{
+        "operator": {"unfixed": "1"},
+        "source": [{"name": "WordPress Complianz plugin <= 7.5.0 - PHP Object Injection vulnerability",
+                    "description": "object injection"}],
+    }]
+    affected = vulndb.affected_vulnerabilities("7.5.5", vulns)
+    assert affected[0]["basis"] == "contradicted"
+    # and the confidence model punishes it hard
+    score = confidence.score(["page-reference", "enum-200"], "stable-tag", "contradicted")
+    assert confidence.tier_for(score) == "UNVERIFIED"
+
+    # same advisory, site on the affected version: no contradiction
+    affected = vulndb.affected_vulnerabilities("7.5.0", vulns)
+    assert affected[0]["basis"] == "unfixed"
+
+    # '< X' / 'X and earlier' forms
+    lt = [{"operator": {"unfixed": "1"},
+           "source": [{"name": "Plugin < 4.0 - SSRF", "description": "ssrf"}]}]
+    assert vulndb.affected_vulnerabilities("4.0", lt)[0]["basis"] == "contradicted"
+    earlier = [{"operator": {"unfixed": "1"},
+                "source": [{"name": "Plugin 3.1.3 and earlier - auth bypass", "description": "d"}]}]
+    assert vulndb.affected_vulnerabilities("3.2.0", earlier)[0]["basis"] == "contradicted"
+    assert vulndb.affected_vulnerabilities("3.1.3", earlier)[0]["basis"] == "unfixed"
+
+
+# ---------------------------------------------------------------- NVD enrichment
+
+NVD_PAYLOAD = {"vulnerabilities": [{"cve": {
+    "configurations": [{"nodes": [{"cpeMatch": [{
+        "criteria": "cpe:2.3:a:wordpress:wordpress:*:*:*:*:*:*:*",
+        "versionStartIncluding": "7.1",
+        "versionEndExcluding": "7.1.2",
+    }]}]}],
+    "metrics": {"cvssMetricV31": [{"cvssData": {"baseScore": 7.4, "baseSeverity": "HIGH"}}]},
+}}]}
+
+
+def test_nvd_operator_parsed_from_cpe_ranges():
+    op = vulndb._nvd_parse_operator(NVD_PAYLOAD)
+    assert op == {"min_version": "7.1", "min_operator": "ge",
+                  "max_version": "7.1.2", "max_operator": "lt"}
+    # a plugin CPE under the same CVE must not bound CORE applicability
+    plugin_only = {"vulnerabilities": [{"cve": {"configurations": [{"nodes": [{"cpeMatch": [{
+        "criteria": "cpe:2.3:a:coolplugin:coolplugin:1.0:*:*:*:*:*:*:*",
+    }]}]}]}}]}
+    assert vulndb._nvd_parse_operator(plugin_only) is None
+    assert vulndb._nvd_severity(NVD_PAYLOAD) == "7.4 (high)"
+
+
+def test_nvd_enrichment_bounds_and_refutes(monkeypatch):
+    """'assumed' core CVEs become bounded or refuted via NVD's version ranges."""
+    vulndb._nvd_cache.clear()
+    monkeypatch.setattr(vulndb.time, "sleep", lambda s: None)  # no rate-limit waits
+
+    def fake_operator(cve_id):
+        return {"min_version": "7.1", "min_operator": "ge",
+                "max_version": "7.1.2", "max_operator": "lt"}
+
+    monkeypatch.setattr(vulndb, "_nvd_operator", fake_operator)
+    vulns = [
+        {"name": "CVE-2026-93485", "description": "core issue", "link": "", "severity": None,
+         "basis": "assumed"},
+        {"name": "Some other advisory", "description": "no cve id", "link": "",
+         "severity": None, "basis": "assumed"},
+    ]
+    out = vulndb.enrich_core_with_nvd("7.1.1", vulns)
+    assert out[0]["basis"] == "bounded"    # 7.1 <= 7.1.1 < 7.1.2
+    assert out[1]["basis"] == "assumed"    # no CVE id -> left alone
+
+    out = vulndb.enrich_core_with_nvd("7.2.0", [
+        {"name": "CVE-2026-93485", "description": "core issue", "link": "",
+         "severity": None, "basis": "assumed"}])
+    assert out[0]["basis"] == "refuted"    # above the range
+
+
+def test_nvd_operator_network_failure_keeps_assumed(monkeypatch):
+    """NVD being down must not change the finding - the scan never depends on it."""
+    vulndb._nvd_cache.clear()
+    monkeypatch.setattr(vulndb.time, "sleep", lambda s: None)
+    monkeypatch.setattr(httpclient, "get", lambda url, **kw: None)
+    assert vulndb._nvd_operator("CVE-2026-93485") is None
+
+
 # ---------------------------------------------------------------- confidence model
+
+def test_dangling_references_reported(monkeypatch):
+    """External hosts that no longer resolve while still linked = broken-link
+    hijack signal; same-site subdomains and infra hosts are not flagged."""
+    from wpbuddy.passive import dangling
+    monkeypatch.setattr(dangling, "_resolves", lambda h: h != "assets.expired-vendor.example.org")
+    report = Report()
+    dangling.check(report, "https://site.example.com/",
+                   '<a href="https://assets.expired-vendor.example.org/logo.png">logo</a>'
+                   '<img src="https://assets.expired-vendor.example.org/banner.png">'
+                   '<script src="https://cdn.site.example.com/app.js"></script>'
+                   '<a href="https://www.w3.org/standards">spec</a>')
+    section = report.doc.write().split("Dangling external references", 1)[1]
+    assert "assets.expired-vendor.example.org" in section
+    assert "referenced 2x" in section
+    assert "cdn.site.example.com" not in section   # same-site subdomain
+    assert "w3.org" not in section                 # infra skip-list
+
+
+def test_dangling_none_when_all_resolve(monkeypatch):
+    from wpbuddy.passive import dangling
+    monkeypatch.setattr(dangling, "_resolves", lambda h: True)
+    report = Report()
+    dangling.check(report, "https://site.example.com/", '<a href="https://fine.example.net/">x</a>')
+    assert "Dangling external references" not in report.doc.write()
+
 
 def test_confidence_score_and_tiers():
     # readme on target + page reference + explicit Stable tag + bounded range
@@ -728,6 +915,44 @@ def test_analyzer_include_demoted_without_request_input(tmp_path):
     inc = [f for f in analyzer.analyze(tmp_path) if f["rule"].startswith("include")
            or f["rule"].startswith("file")]
     assert inc and inc[0]["severity"] == "LOW" and inc[0]["rule"] == "include-variable"
+
+
+def test_analyzer_ajax_missing_auth_rule(tmp_path):
+    """The Claude+Semgrep join rule: wp_ajax registrations whose callback body
+    lacks a capability/nonce check. nopriv = unauthenticated (HIGH)."""
+    tmp_path.joinpath("ajax.php").write_text(
+        '<?php\n'
+        "add_action('wp_ajax_nopriv_export_data', 'export_data');\n"
+        "function export_data() { echo file_get_contents($_GET['file']); }\n"
+        "add_action('wp_ajax_admin_tool', 'admin_tool_checked');\n"
+        "function admin_tool_checked() {\n"
+        "    if (!current_user_can('manage_options')) { wp_die('no'); }\n"
+        "    delete_option($_POST['opt']);\n"
+        "}\n"
+        "add_action('wp_ajax_subthing', 'subthing');\n"
+        "function subthing() { update_option('x', $_POST['v']); }\n"
+        "add_action('wp_ajax_ignored', array($this, 'method'));\n"  # array callback: skipped
+    )
+    ajax = [f for f in analyzer.analyze(tmp_path) if f["rule"] == "ajax-handler-no-auth"]
+    unauth = [f for f in ajax if "nopriv" in f["snippet"]]
+    assert len(unauth) == 1 and unauth[0]["severity"] == "HIGH"
+    sub = [f for f in ajax if "subthing" in f["snippet"]]
+    assert len(sub) == 1 and sub[0]["severity"] == "MEDIUM"
+    # the capability-checked callback is NOT flagged; array callbacks skipped
+    assert not any("admin_tool_checked" in f["snippet"] or "ignored" in f["snippet"]
+                   for f in ajax)
+
+
+def test_analyzer_is_admin_is_not_authorization(tmp_path):
+    """is_admin() checks request context, not user capabilities - hiding
+    behind it must still be flagged (documented WP gotcha)."""
+    tmp_path.joinpath("fake.php").write_text(
+        '<?php\n'
+        "add_action('wp_ajax_nopriv_leak', 'leak_it');\n"
+        "function leak_it() { if (is_admin()) { echo get_option('secret'); } }\n"
+    )
+    hits = [f for f in analyzer.analyze(tmp_path) if f["rule"] == "ajax-handler-no-auth"]
+    assert hits and hits[0]["severity"] == "HIGH"
 
 
 def test_divi_changelog_version():

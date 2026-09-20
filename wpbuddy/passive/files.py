@@ -45,11 +45,25 @@ SENSITIVE_FILES = {
     "wp-config.php.bak": "backed-up wp-config may contain DB credentials",
     "wp-config.php~": "editor backup of wp-config may contain DB credentials",
     "wp-config.php.save": "saved copy of wp-config may contain DB credentials",
+    "wp-config.php.old": "renamed old wp-config may contain DB credentials",
+    "wp-config.php.orig": "original wp-config copy may contain DB credentials",
     ".env": "environment files often hold secrets (DB, SMTP, API keys)",
     "wp-content/debug.log": "debug log leaks paths, users, sometimes secrets",
     ".git/HEAD": "exposed Git repository allows full source recovery",
     "wp-content/uploads/dump.sql": "database dump in uploads",
     "wp-content/backups/": "backup folder - directory listing may expose archives",
+    "backup.zip": "site backup archive in the web root",
+    "wordpress.zip": "WordPress archive in the web root",
+    "db.sql": "database dump in the web root",
+    "phpinfo.php": "phpinfo() disclosure (PHP version, modules, paths)",
+    ".htpasswd": "HTTP basic-auth password file (crackable hashes)",
+}
+
+# Binary artifacts identified by magic bytes instead of a text regex
+# (a ZIP served as 200 is an archive no matter what the HTML says).
+MAGIC_SIGNATURES = {
+    "backup.zip": (b"PK\x03\x04", "ZIP archive"),
+    "wordpress.zip": (b"PK\x03\x04", "ZIP archive"),
 }
 
 # path -> (content regex, what matching content proves). A 200 alone proves
@@ -59,13 +73,19 @@ CONTENT_SIGNATURES = {
     "wp-config.php.bak": (r"DB_PASSWORD|DB_NAME|table_prefix", "WordPress DB credentials"),
     "wp-config.php~": (r"DB_PASSWORD|DB_NAME|table_prefix", "WordPress DB credentials"),
     "wp-config.php.save": (r"DB_PASSWORD|DB_NAME|table_prefix", "WordPress DB credentials"),
+    "wp-config.php.old": (r"DB_PASSWORD|DB_NAME|table_prefix", "WordPress DB credentials"),
+    "wp-config.php.orig": (r"DB_PASSWORD|DB_NAME|table_prefix", "WordPress DB credentials"),
     ".env": (r"(?m)^[A-Z0-9_]{2,}\s*=", "environment variable definitions"),
     "wp-content/debug.log": (r"PHP (?:Notice|Warning|Fatal error|Deprecated|Parse error)",
                              "PHP debug output"),
     "wp-content/uploads/dump.sql": (r"CREATE TABLE|INSERT INTO|MySQL dump", "SQL dump content"),
+    "db.sql": (r"CREATE TABLE|INSERT INTO|MySQL dump", "SQL dump content"),
     ".git/HEAD": (r"ref:\s*refs/", "git repository metadata"),
     "readme.html": (r"Version\s+\d", "WordPress version disclosure"),
     "wp-content/backups/": (re.escape(LISTING_MARKER), "directory listing"),
+    "phpinfo.php": (r"phpinfo\s*\(\)|PHP Version</|phpinfo\(\)", "phpinfo() output page"),
+    ".htpasswd": (r"(?m)^\S+:(?:\$apr1\$|\$2y?\$|\$P\$|[A-Za-z0-9./]{13})",
+                  "htpasswd credential hashes"),
 }
 
 
@@ -303,6 +323,9 @@ def _classify(path, resp, baseline, target):
     signature = CONTENT_SIGNATURES.get(path)
     if signature and re.search(signature[0], body, re.I):
         return "confirmed", signature[1]
+    magic = MAGIC_SIGNATURES.get(path)
+    if magic and (resp.content or b"").startswith(magic[0]):
+        return "confirmed", magic[1]
     if NOT_FOUND_MARKERS.search(body[:MARKER_SCAN_BYTES]):
         return "absent", ""  # the body itself says "not found"/challenge
     if baseline and _matches_baseline(resp, baseline):
@@ -323,6 +346,26 @@ def _redirects_into_site(location, target):
         return True  # no Location header at all - treat as unreachable answer
     host = urlsplit(location).hostname or urlsplit(target).hostname
     return host == (urlsplit(target).hostname or "")
+
+
+def check_setup_wizard(report, target):
+    """wp-admin/setup-config.php: the installation wizard must not be walkable
+    on a deployed site (it can rewrite wp-config.php = full takeover).
+    """
+    resp = httpclient.get(f"{target}wp-admin/setup-config.php", allow_redirects=False)
+    if resp is None or resp.status_code != 200:
+        return
+    body = resp.text or ""
+    if "already exists" in body.lower():
+        return  # installed site politely refusing - the normal, safe answer
+    if re.search(r"name=[\"']dbname[\"']|setup-config\.php\?step=", body, re.I):
+        print("[!] WordPress setup wizard reachable (wp-admin/setup-config.php)")
+        report.paragraph("**Setup wizard reachable** at `wp-admin/setup-config.php` - the "
+                         "installation/configuration step is still being served. On a "
+                         "partially installed or misconfigured site this allows "
+                         "re-running setup and overwriting wp-config.php (full site "
+                         "takeover with reachable DB credentials). Verify it actually "
+                         "progresses on this install.")
 
 
 def check_directory_listing(report, target, slug, kind="plugins"):

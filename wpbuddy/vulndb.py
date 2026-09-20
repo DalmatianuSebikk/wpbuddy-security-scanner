@@ -10,12 +10,73 @@ API notes (verified 2026-09):
   version (including ones fixed in later releases), so results are reported
   as-is: no local "is my version newer" filtering - that only created false
   negatives.
+
+Upstream data hygiene, handled locally because the API sometimes serves
+scraped garbage: advisory names that are really error-page titles ("404
+Page Not Found") get replaced by their CVE id, and version bounds stated in
+advisory TITLES ("<plugin> <= 7.5.0 - ...") are cross-checked against the
+installed version - an 'unfixed' flag contradicted by its own title is
+stale upstream data, kept in the report but demoted ('contradicted' basis).
 """
+
+import os
+import re
+import time
 
 from . import httpclient
 from .versioning import compare_versions, major_minor
 
 API_BASE = "https://www.wpvulnerability.net"
+
+# Second source for CORE CVE applicability: NVD's CPE criteria carry explicit
+# version ranges the wpvulnerability.net operator objects sometimes lack, so
+# an 'assumed' finding can become bounded (or refuted). Unauthenticated NVD
+# allows 5 requests / 30 s - set NVD_API_KEY to raise that.
+NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+NVD_RATE_DELAY = 6.0
+_nvd_cache = {}
+_nvd_last_fetch = 0.0
+
+# Advisory "names" that are actually scraped error/interstitial page titles.
+_JUNK_NAME_RE = re.compile(
+    r"^\s*(?:error|40[0-9]|50[0-9])\b|not found|access denied|just a moment|"
+    r"attention required|forbidden", re.I)
+_CVE_ID_RE = re.compile(r"(CVE-\d{4}-\d{4,})", re.I)
+
+# Version bounds stated inside advisory titles ("... plugin <= 7.5.0 - ...").
+_TITLE_MAX_LE = re.compile(r"(?:<=|≤|up to|through)\s*v?(\d+(?:\.\d+)+)", re.I)
+_TITLE_MAX_LT = re.compile(r"(?:<|before|earlier than)\s*v?(\d+(?:\.\d+)+)", re.I)
+_TITLE_EARLIER = re.compile(r"v?(\d+(?:\.\d+)+)\s*(?:and earlier|and below)", re.I)
+
+
+def _clean_name(raw_name, link):
+    """Replace error-page-title advisory names with their CVE id (or a placeholder)."""
+    if not raw_name or not _JUNK_NAME_RE.search(raw_name):
+        return raw_name or "Unnamed issue"
+    cve = _CVE_ID_RE.search(link or "") or _CVE_ID_RE.search(raw_name)
+    return (cve.group(1) if cve else "Unnamed advisory") + " (advisory title unreadable)"
+
+
+def _title_contradicts(installed, name):
+    """True when the advisory title's own version bound excludes `installed`.
+
+    Titles like "Plugin <= 7.5.0 - Object Injection" carry the range the
+    operator object sometimes lacks; when the flag says unfixed/assumed but
+    the title bounds the issue below the installed version, the upstream
+    entry is stale - the site is very likely already patched.
+    """
+    bound, op = None, None
+    match = _TITLE_MAX_LE.search(name) or _TITLE_EARLIER.search(name)
+    if match:
+        bound, op = match.group(1), "le"
+    else:
+        match = _TITLE_MAX_LT.search(name)
+        if match:
+            bound, op = match.group(1), "lt"
+    if not bound:
+        return False
+    cmp = compare_versions(installed, bound)
+    return (op == "le" and cmp > 0) or (op == "lt" and cmp >= 0)
 
 
 def _fetch(kind, slug):
@@ -97,7 +158,10 @@ def affected_vulnerabilities(installed_version, vulns):
         if not affected:
             continue
         source = (vuln.get("source") or [{}])[0]
-        name = source.get("name") or vuln.get("name") or "Unnamed issue"
+        link = source.get("link")
+        name = _clean_name(source.get("name") or vuln.get("name"), link)
+        if affected and basis != "bounded" and _title_contradicts(installed_version, name):
+            basis = "contradicted"
         description = source.get("description") or ""
         # The same issue often arrives from several sources (CVE + WPScan +
         # Wordfence); dedupe on the description text, like the core scan intended.
@@ -108,7 +172,7 @@ def affected_vulnerabilities(installed_version, vulns):
         out.append({
             "name": name,
             "description": description,
-            "link": source.get("link"),
+            "link": link,
             "severity": _severity(vuln),
             "basis": basis,
         })
@@ -120,4 +184,118 @@ def _severity(vuln):
         cvss = vuln["impact"]["cvss3"]
         return f"{cvss.get('score', '?')} ({cvss.get('severity', 'unknown')})"
     except (KeyError, TypeError):
+        return None
+
+
+# ---------------------------------------------------------------- NVD enrichment
+
+def enrich_core_with_nvd(version, affected):
+    """Second-source check for core CVEs the API gave no range for.
+
+    For every 'assumed' finding with a CVE id, NVD's CPE criteria are fetched
+    (rate-limited, cached) and re-applied: an explicit range that INCLUDES the
+    installed version turns the basis 'bounded'; one that EXCLUDES it marks
+    the finding 'refuted' (kept in the report, heavily demoted - the scanner
+    never silently drops anything). Any network/API failure keeps the
+    original basis: the scan must not depend on a second database being up.
+    """
+    for vuln in affected or []:
+        if vuln.get("basis") != "assumed":
+            continue
+        cve = _CVE_ID_RE.search(vuln.get("link") or "") or _CVE_ID_RE.search(vuln.get("name") or "")
+        if not cve:
+            continue
+        cve_id = cve.group(1).upper()
+        operator = _nvd_operator(cve_id)
+        if not operator:
+            continue
+        hit, _ = is_affected(version, operator)
+        vuln["basis"] = "bounded" if hit else "refuted"
+        if not vuln.get("severity"):
+            severity = _nvd_cache.get(f"severity:{cve_id}")
+            if severity:
+                vuln["severity"] = severity
+    return affected
+
+
+def _nvd_throttle():
+    """Sleep just enough to stay inside NVD's unauthenticated rate window."""
+    global _nvd_last_fetch
+    elapsed = time.monotonic() - _nvd_last_fetch
+    if elapsed < NVD_RATE_DELAY:
+        time.sleep(NVD_RATE_DELAY - elapsed)
+    _nvd_last_fetch = time.monotonic()
+
+
+def _nvd_operator(cve_id):
+    """Version-range operator for a WordPress-core CVE from NVD, or None.
+
+    One fetch per CVE caches both the applicability operator and the CVSS
+    severity string (used to fill findings the primary API left unscored).
+    """
+    if cve_id in _nvd_cache:
+        return _nvd_cache[cve_id]
+    _nvd_throttle()
+    headers = {"apiKey": os.environ["NVD_API_KEY"]} if os.environ.get("NVD_API_KEY") else {}
+    payload = None
+    resp = httpclient.get(f"{NVD_API}?cveId={cve_id}", retries=1, headers=headers)
+    if resp is not None and resp.status_code == 200:
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = None
+    operator = _nvd_parse_operator(payload) if isinstance(payload, dict) else None
+    severity = _nvd_severity(payload) if isinstance(payload, dict) else None
+    _nvd_cache[cve_id] = operator
+    if severity:
+        _nvd_cache[f"severity:{cve_id}"] = severity
+    return operator
+
+
+def _nvd_parse_operator(payload):
+    """Extract a {min,max}_version/{min,max}_operator dict from an NVD record.
+
+    Only CPE criteria targeting wordpress:wordpress count - a CVE listing a
+    plugin under the same id must not bound CORE applicability.
+    """
+    try:
+        configs = payload["vulnerabilities"][0]["cve"]["configurations"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    for conf in configs or []:
+        for node in conf.get("nodes", []) or []:
+            for match in node.get("cpeMatch", []) or []:
+                criteria = match.get("criteria", "")
+                if "a:wordpress:wordpress" not in criteria:
+                    continue
+                operator = {}
+                if match.get("versionStartIncluding"):
+                    operator["min_version"] = match["versionStartIncluding"]
+                    operator["min_operator"] = "ge"
+                if match.get("versionStartExcluding"):
+                    operator["min_version"] = match["versionStartExcluding"]
+                    operator["min_operator"] = "gt"
+                if match.get("versionEndIncluding"):
+                    operator["max_version"] = match["versionEndIncluding"]
+                    operator["max_operator"] = "le"
+                if match.get("versionEndExcluding"):
+                    operator["max_version"] = match["versionEndExcluding"]
+                    operator["max_operator"] = "lt"
+                exact = re.search(r"a:wordpress:wordpress:(\d+(?:\.\d+)*)", criteria)
+                if not operator and exact:
+                    operator = {"min_version": exact.group(1), "min_operator": "ge",
+                                "max_version": exact.group(1), "max_operator": "le"}
+                if operator:
+                    return operator
+    return None
+
+
+def _nvd_severity(payload):
+    """CVSS score/severity string from an NVD record, or None."""
+    try:
+        metrics = payload["vulnerabilities"][0]["cve"]["metrics"]
+        cvss = (metrics.get("cvssMetricV31") or metrics.get("cvssMetricV30")
+                or metrics.get("cvssMetricV2"))[0]["cvssData"]
+        return f"{cvss.get('baseScore', '?')} ({str(cvss.get('baseSeverity', '?')).lower()})"
+    except (KeyError, IndexError, TypeError, AttributeError):
         return None

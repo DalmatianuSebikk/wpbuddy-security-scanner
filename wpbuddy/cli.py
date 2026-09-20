@@ -3,6 +3,7 @@
 import argparse
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from . import __version__, active, codeaudit, config, confidence, httpclient, passive
 from .report import Report
@@ -124,6 +125,7 @@ def main(argv=None):
         sys.exit(1)
     if not target.endswith("/"):
         target += "/"
+    config.TARGET_HOST = (urlparse(target).hostname or "").lower()
 
     # Apply global HTTP settings chosen on the CLI.
     config.DEFAULT_TIMEOUT = args.timeout

@@ -126,6 +126,19 @@ FILE_RULES = [
      re.compile(r"\$_(POST|REQUEST)\s*\["), re.compile(r"check_admin_referer|wp_verify_nonce|wp_nonce_field|check_ajax_referer")),
 ]
 
+# AJAX/admin handlers registered without authorization in the callback - the
+# vulnerability class behind a large share of recent plugin CVEs (the
+# Claude+Semgrep CVE-hunting workflow popularized the join: registration on
+# one line, missing check in the callback's BODY).
+AJAX_ACTION_RE = re.compile(
+    r"add_action\s*\(\s*['\"]((?:wp_ajax(?:_nopriv)?|admin_post|admin_action)_[\w-]+)['\"]"
+    r"\s*,\s*['\"](\w+)['\"]")
+AUTH_CHECK_RE = re.compile(
+    r"current_user_can|wp_verify_nonce|check_ajax_referer|check_admin_referer")
+# NB: is_admin() is deliberately NOT in that list - it checks whether the
+# request is in /wp-admin context, NOT the user's capabilities, and is a
+# classic non-authorization check to hide behind.
+
 
 def analyze(root):
     """Walk a directory of source and return findings sorted by severity.
@@ -171,7 +184,59 @@ def _scan_file(rel, lines, rules):
 
     if not NOT_ENDPOINT_BASENAME.search(Path(rel).name):
         findings.extend(_scan_file_heuristics(rel, lines))
+    findings.extend(_scan_ajax_auth(rel, lines))
     return findings
+
+
+def _scan_ajax_auth(rel, lines):
+    """wp_ajax_* / admin_post_* callbacks whose bodies contain no capability
+    or nonce check. Two passes over the file (the 'join'): collect the
+    add_action() registrations, then locate each named callback's body.
+
+    Severity: wp_ajax_nopriv_* handlers are callable UNAUTHENTICATED (HIGH);
+    plain wp_ajax_*/admin_post_* need only a logged-in Subscriber (MEDIUM).
+    """
+    code_lines = [code_view(line) for line in lines]
+    findings = []
+    # registrations are matched on the RAW line: the action/callback names
+    # live inside single-quoted strings, which code_view blanks
+    for lineno, line in enumerate(lines, 1):
+        for match in AJAX_ACTION_RE.finditer(line):
+            action, callback = match.group(1), match.group(2)
+            body = _function_body(code_lines, callback)
+            if body is None or AUTH_CHECK_RE.search(body):
+                continue
+            unauthenticated = "nopriv" in action
+            findings.append(_finding(
+                "HIGH" if unauthenticated else "MEDIUM",
+                "ajax-handler-no-auth",
+                f"`{action}` callback `{callback}()` has no capability/nonce check - "
+                + ("callable by UNAUTHENTICATED visitors"
+                   if unauthenticated else
+                   "callable by any logged-in user (a Subscriber account is enough)"),
+                rel, lineno, lines[lineno - 1].strip()))
+    return findings
+
+
+def _function_body(code_lines, name):
+    """The brace-delimited body of function `name`, or None if not found.
+
+    Works on the code_view'd lines (string contents blanked) so braces inside
+    string literals don't break the depth count.
+    """
+    func_re = re.compile(rf"function\s+{re.escape(name)}\s*\(")
+    start = next((i for i, line in enumerate(code_lines) if func_re.search(line)), None)
+    if start is None:
+        return None
+    depth, opened, body = 0, False, []
+    for line in code_lines[start:start + 400]:
+        body.append(line)
+        depth += line.count("{") - line.count("}")
+        if "{" in line:
+            opened = True
+        if opened and depth <= 0:
+            break
+    return "\n".join(body) if opened else None
 
 
 def _scan_file_heuristics(rel, lines):
