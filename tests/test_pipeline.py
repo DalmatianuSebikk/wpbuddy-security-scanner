@@ -2213,6 +2213,22 @@ def test_credentials_reach_graph_and_can_be_masked(mock, tmp_path, monkeypatch, 
     capsys.readouterr()
 
 
+# ------------------------------------------------------------- dictionary (P2-8)
+
+def test_default_dictionary_sized_and_newline_terminated():
+    """numeparola.txt carries a few hundred common passwords; every data
+    file ends with a newline (load_lines must not miss a final entry)."""
+    from wpbuddy import config
+    entries = config.load_lines(config.DATA_DIR / "numeparola.txt")
+    assert len(entries) > 200
+    assert len(set(entries)) == len(entries)      # no duplicates
+    for name in ("numeparola.txt", "sprayPasswords.txt", "pluginList.txt"):
+        raw = (config.DATA_DIR / name).read_bytes()
+        assert raw.endswith(b"\n"), f"{name} must end with a newline"
+    # the spray list stays small and curated by design
+    assert len(config.load_lines(config.DATA_DIR / "sprayPasswords.txt")) < 30
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
