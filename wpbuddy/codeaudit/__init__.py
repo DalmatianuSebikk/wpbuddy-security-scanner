@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .. import config
+from ..passive import files as passive_files  # listing finding (P1-7); no cycle
 from . import analyzer, gather, poc
 
 _MODES = ("auto", "target", "source", "off")
@@ -68,6 +69,11 @@ def run(report, target, passive_results, args):
             path = workdir / f"{kind}-{slug}-{version}" if version else \
                 workdir / f"{kind}-{slug}-unknown"
             mirrored = False
+            # A listing probe doubles as a finding when it succeeds (P1-7);
+            # only the modes that already request listings do this, keeping
+            # the --stealth contract of P0-2 intact.
+            if mode in ("auto", "target"):
+                passive_files.check_directory_listing(report, target, slug, f"{kind}s")
             if version and path.exists():
                 source, origin, mirrored = _load_cached_source(path, version)
             else:

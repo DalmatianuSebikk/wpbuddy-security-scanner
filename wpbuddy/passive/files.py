@@ -433,14 +433,23 @@ def check_setup_wizard(report, target):
 
 
 def check_directory_listing(report, target, slug, kind="plugins"):
-    """Check whether wp-content/<kind>/<slug>/ has directory listing enabled."""
+    """Report whether wp-content/<kind>/<slug>/ has directory listing enabled.
+
+    Called by the code-audit phase once per discovered component in target
+    and auto mode (which already request the listing for mirroring): an
+    exposed listing is a real finding on its own, not just audit
+    provenance (P1-7).
+    """
     url = f"{target}wp-content/{kind}/{slug}/"
     resp = httpclient.get(url)
-    if resp is None or resp.status_code != 200:
+    if resp is None or resp.status_code != 200 or LISTING_MARKER not in resp.text:
         return False
-    if LISTING_MARKER in resp.text:
-        print(f"[!] Directory listing enabled: {url}")
-        report.paragraph(f"Directory listing is **enabled** on {url} - the full source of this "
-                         f"component (and any unprotected uploads inside it) is browsable.")
-        return True
-    return False
+    print(f"[!] Directory listing enabled: {url}")
+    report.paragraph(f"**Exposed directory listing** on `{url}` - the full source of "
+                     f"this component (and any unprotected files inside it) is browsable "
+                     f"by anyone. An attacker gets the exact deployed code for free, "
+                     f"including files that normal WordPress routing would never serve.")
+    report.paragraph("**Recommendation:** disable directory indexes in the web server "
+                     "(`Options -Indexes` under Apache, `autoindex off` under nginx) and "
+                     "block direct execution of PHP under wp-content.")
+    return True

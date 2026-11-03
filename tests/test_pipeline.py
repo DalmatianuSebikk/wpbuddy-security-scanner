@@ -1904,6 +1904,23 @@ def test_audit_target_mode_uses_operator_archive(mock, tmp_path, monkeypatch):
     assert "operator-provided archive" in text
 
 
+# ------------------------------------------------------------- directory listing finding (P1-7)
+
+def test_directory_listing_reported_as_finding(mock, tmp_path, monkeypatch):
+    """A listing under wp-content/plugins/<slug>/ is a report finding with a
+    recommendation - not just a log line (P1-7)."""
+    from wpbuddy import codeaudit
+    monkeypatch.chdir(tmp_path)
+    args = SimpleNamespace(audit_code="target", verify_pocs=False, source_dir=None)
+
+    report = Report()
+    codeaudit.run(report, mock, {"plugins": {"vulnplugin": "1.2.8"}}, args)
+    text = report.doc.write()
+    assert "Exposed directory listing" in text
+    assert f"`{mock}wp-content/plugins/vulnplugin/`" in text
+    assert "Options -Indexes" in text
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
