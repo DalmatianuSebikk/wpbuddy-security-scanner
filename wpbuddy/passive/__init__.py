@@ -301,11 +301,12 @@ def _scan_rest(report, target, namespaces):
 
 
 def _format_vuln(v, tier_label=None):
-    text = f"**{v['name']}**"
+    from ..report import escape_md, _md_url
+    text = f"**{escape_md(v['name'])}**"
     if tier_label:
         text += f" {tier_label}"
     if v.get("severity"):
-        text += f" (CVSS {v['severity']})"
+        text += f" (CVSS {escape_md(v['severity'])})"
     # descriptions arrive as multi-paragraph prose; one line, capped, keeps
     # the finding a bullet instead of breaking the list apart
     description = (v.get("description") or "").strip()
@@ -326,5 +327,5 @@ def _format_vuln(v, tier_label=None):
     # the advisory carries the actual exploitation details (vulnerable endpoint,
     # parameters, PoC steps) that a scanner cannot responsibly auto-fire
     if v.get("link"):
-        text += f" ([advisory with exploitation details]({v['link']}))"
+        text += f" ([advisory with exploitation details]({_md_url(v['link'])}))"
     return text

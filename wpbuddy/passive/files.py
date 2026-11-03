@@ -27,6 +27,7 @@ import string
 from urllib.parse import urlsplit
 
 from .. import httpclient
+from ..report import escape_md as report_escape
 
 LISTING_MARKER = "Index of /"
 
@@ -140,7 +141,7 @@ def check_headers(report, target):
         report.bullets([f"**{h}** - {why}" for h, why in expected.items() if h in missing])
     if present:
         report.paragraph("Headers already present:")
-        report.bullets([f"**{h}**: {resp.headers[h]}" for h in present])
+        report.bullets([f"**{h}**: {report_escape(resp.headers[h])}" for h in present])
     if not https:
         report.paragraph("`Strict-Transport-Security` is not listed above because the scan ran "
                          "over plain HTTP - browsers only honour HSTS on HTTPS responses. Moving "
@@ -148,7 +149,7 @@ def check_headers(report, target):
 
     for leak in ("Server", "X-Powered-By"):
         if leak in resp.headers:
-            value = resp.headers[leak]
+            value = report_escape(resp.headers[leak])
             print(f"[*] Info leak: {leak}: {value}")
             report.paragraph(f"Technology disclosure: **{leak}: {value}**")
 
@@ -182,7 +183,8 @@ def check_robots(report, target):
     if interesting:
         report.paragraph("Interesting `Disallow` entries (hidden-but-public paths worth reviewing; "
                          "standard WordPress/Yoast defaults omitted):")
-        report.bullets(interesting)
+        # robots.txt is written by the site: its entries must render literally
+        report.bullets([report_escape(d) for d in interesting])
 
 
 def check_sensitive_files(report, target):

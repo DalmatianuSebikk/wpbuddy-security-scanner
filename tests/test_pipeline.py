@@ -2138,6 +2138,46 @@ def test_dangling_dns_timeout_returns_and_continues(monkeypatch):
     assert "hang.example.org" not in text    # timeout is not 'dangling'
 
 
+# ------------------------------------------------------------- markdown escaping (P2-6)
+
+def test_escape_md_and_fence_guard():
+    """Target-controlled text renders literally; code bodies stay raw but
+    cannot break out of their fence."""
+    from wpbuddy.report import escape_md
+    assert escape_md("evil*slug`x[y]_z") == r"evil\*slug\`x\[y\]\_z"
+    assert escape_md("# heading-like name") == r"\# heading-like name"
+    assert escape_md("- list-like") == r"\- list-like"
+    assert escape_md("normal text 1.0") == "normal text 1.0"
+    assert escape_md("") == ""
+
+    report = Report()
+    report.code("evidence line\n```\necho 'injected'\n```\nmore evidence")
+    text = report.doc.write()
+    assert "````" in text                     # fence grew to contain the inner ```
+    assert "echo 'injected'" in text
+
+
+def test_target_controlled_values_render_literally(monkeypatch):
+    """Server/header values with markdown characters don't reformat the report."""
+    resp = FakeResp(200, "", url="http://x.example.com/")
+    resp.headers = {"Server": "nginx*weird [build]", "Content-Security-Policy": "default-src 'self'"}
+    monkeypatch.setattr(httpclient, "get", lambda url, **kw: resp)
+
+    report = Report()
+    files.check_headers(report, "http://x.example.com/")
+    text = report.doc.write()
+    assert r"nginx\*weird \[build\]" in text
+    assert "**nginx*weird" not in text          # no accidental bolding
+
+    # advisory names from the scraped DB are escaped too
+    from wpbuddy import passive
+    out = passive._format_vuln({"name": "Plugin*[x]* <= 1.0 - bad name",
+                                "severity": "7.5 (high) *extra*", "description": "",
+                                "link": "https://advisory.example/x(1)?a b", "basis": None})
+    assert r"\*" in out and r"\[" in out
+    assert "%28" in out and "%20" in out       # link destination made markdown-safe
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

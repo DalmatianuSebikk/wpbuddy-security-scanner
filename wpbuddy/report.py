@@ -1,20 +1,43 @@
 """Thin, friendlier wrapper around markdownmaker used for scan reports."""
 
+import re
 from pathlib import Path
 
 from markdownmaker.document import Document
 from markdownmaker.markdownmaker import (
-    Bold,
     CodeBlock,
     Header,
     HeaderSubLevel,
     HorizontalRule,
-    Italic,
-    Link,
     OrderedList,
     Paragraph,
     UnorderedList,
 )
+
+# markdown-active characters that must render literally when they come from
+# the scanned site or scraped databases (P2-6)
+_MD_SPECIAL = re.compile(r"([`*_\[\]])")
+_MD_LINE_START = re.compile(r"^(\s*)([#>\-+])")
+
+
+def escape_md(text):
+    """Escape markdown syntax characters in target-controlled text.
+
+    Advisory names, header values, server strings, robots entries and
+    operator slugs must never reformat the report (an unescaped '*' in a
+    plugin slug once bolded half a line). Fenced code bodies are NOT passed
+    through this - they stay raw evidence; Report.code guards their fences
+    instead.
+    """
+    if not text:
+        return text
+    text = _MD_SPECIAL.sub(r"\\\1", str(text))
+    return _MD_LINE_START.sub(r"\1\\\2", text)
+
+
+def _md_url(url):
+    """A markdown-safe link destination (spaces/parens break [text](url))."""
+    return str(url).replace(" ", "%20").replace("(", "%28").replace(")", "%29")
 
 
 class Report:
@@ -42,7 +65,16 @@ class Report:
             self.doc.add(OrderedList(tuple(items)))
 
     def code(self, text):
-        self.doc.add(CodeBlock(text))
+        """Fenced code block. Bodies stay raw (they are evidence), but a
+        body line of ``` would close the fence early and leak the rest into
+        the report - use a longer fence than any backtick run inside."""
+        text = str(text)
+        longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+        if longest >= 3:
+            fence = "`" * (longest + 1)
+            self.doc.add(f"{fence}\n{text}\n{fence}")
+        else:
+            self.doc.add(CodeBlock(text))
 
     def rule(self):
         self.doc.add(HorizontalRule())
