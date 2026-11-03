@@ -1,6 +1,7 @@
 """WpBuddy command line interface."""
 
 import argparse
+import json
 import sys
 import time
 from datetime import datetime
@@ -134,6 +135,17 @@ Examples:
                         help="Authenticated mode (F-3): WordPress application password "
                              "(application password, not the login password) sent as Basic auth "
                              "to the target only")
+    parser.add_argument("--diff", metavar="PREV_JSON",
+                        help="Compare this scan's knowledge graph against a previous "
+                             "--json output and report what changed (new/resolved findings)")
+    parser.add_argument("--fail-on", choices=("none", "critical", "high", "medium", "any"),
+                        default="none",
+                        help="Exit with code 1 when a finding at or above this severity exists "
+                             "(credentials always count as critical) (default: %(default)s)")
+    parser.add_argument("--suppressions", metavar="FILE",
+                        help="File of patterns (substring, case-insensitive) matched against "
+                             "'component:name' of vulnerability findings; matches are excluded "
+                             "from the priorities summary and --fail-on")
     parser.add_argument("--version", action="version", version=f"WpBuddy {__version__}")
     return parser
 
@@ -235,10 +247,14 @@ def _run_db_command(argv):
           + (f", {fail} failed" if fail else ""))
 
 
-def _write_priorities(report, model):
+def _write_priorities(report, model, suppressions=()):
     """The Remediation priorities section (F-2): what to fix first."""
     creds = model.credentials()
-    risks = model.risks()
+    risks = [r for r in model.risks() if not _suppressed(r, suppressions)]
+    if suppressions:
+        suppressed_count = len(model.risks()) - len(risks)
+        if suppressed_count:
+            print(f"[*] {suppressed_count} finding(s) suppressed from the priorities list")
     if not creds and not risks:
         return
     report.section("Remediation priorities")
@@ -263,6 +279,142 @@ def _write_priorities(report, model):
     if len(risks) > len(top):
         report.paragraph(f"...and {len(risks) - len(top)} lower-risk findings in the "
                          "sections above.")
+
+
+def _suppressed(risk_item, patterns):
+    """True when a finding matches a --suppressions pattern."""
+    if not patterns:
+        return False
+    haystack = f"{risk_item.get('component')}:{risk_item.get('name') or ''}".lower()
+    return any(pattern.lower() in haystack for pattern in patterns)
+
+
+def _severity_band(severity):
+    """'critical'|'high'|'medium'|'low' from a severity string or CVSS number."""
+    from . import risk
+    text = str(severity or "").lower()
+    for band in ("critical", "high", "medium", "low"):
+        if band in text:
+            return band
+    cvss = risk.parse_cvss(severity)
+    if cvss is None:
+        return None
+    if cvss >= 9.0:
+        return "critical"
+    if cvss >= 7.0:
+        return "high"
+    if cvss >= 4.0:
+        return "medium"
+    return "low"
+
+
+_BAND_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
+def _write_exec_summary(report, model, metadata):
+    """The executive summary, spliced in right under the title (F-10)."""
+    summary = Report()
+    summary.section("Executive summary")
+    summary.paragraph(" | ".join(f"{key}: {value}" for key, value in metadata))
+
+    components = model.components()
+    by_type = {}
+    for node in components:
+        by_type[node["type"]] = by_type.get(node["type"], 0) + 1
+    comp_text = ", ".join(f"{n} {kind}(s)" for kind, n in sorted(by_type.items())) or "none"
+
+    risks = model.risks()
+    bands = {}
+    for item in risks:
+        band = _severity_band(item.get("severity")) or "unknown"
+        bands[band] = bands.get(band, 0) + 1
+    creds = model.credentials()
+
+    summary.paragraph(f"Components discovered: {comp_text}. Vulnerability findings: "
+                     f"{len(risks)}"
+                     + (" (" + ", ".join(f"{n} {band}" for band, n in sorted(
+                         bands.items(), key=lambda kv: _BAND_ORDER.get(kv[0], 9))) + ")"
+                        if bands else "")
+                     + (f". **Working credentials: {len(creds)}**" if creds else "")
+                     + ".")
+    if risks:
+        summary.paragraph("Highest risks right now:")
+        summary.bullets([
+            f"**{r['risk']}** - {r['component']}: {r['name']}"
+            + (f" (CVSS {r['severity']})" if r.get("severity") else "")
+            for r in risks[:3]
+        ])
+        summary.paragraph("Fix order and full detail: 'Remediation priorities' at the "
+                          "end of this report; per-component findings above.")
+    else:
+        summary.paragraph("No vulnerability findings were recorded in this scan.")
+    report.prepend(summary)
+
+
+def _write_diff_section(report, model, previous_json_path, target):
+    """What changed since the graph in previous_json_path (F-10)."""
+    from pathlib import Path
+    try:
+        previous = json.loads(Path(previous_json_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"[!] --diff: could not read previous graph ({e}); skipping")
+        return
+    prev_nodes = {n["id"]: n for n in previous.get("nodes", [])}
+    current = model.to_dict(target)
+    curr_nodes = {n["id"]: n for n in current["nodes"]}
+
+    prev_components = {i for i, n in prev_nodes.items() if n.get("type") != "vulnerability"}
+    curr_components = {i for i, n in curr_nodes.items() if n.get("type") != "vulnerability"}
+    new_components = sorted(curr_components - prev_components)
+    gone_components = sorted(prev_components - curr_components)
+
+    def vuln_set(nodes):
+        out = set()
+        for edge in (previous.get("edges") if nodes is prev_nodes else current["edges"]):
+            if edge.get("relation") != "affected-by":
+                continue
+            label = nodes.get(edge["to"], {}).get("label", "?")
+            out.add((edge["from"], label))
+        return out
+
+    prev_vulns, curr_vulns = vuln_set(prev_nodes), vuln_set(curr_nodes)
+
+    report.section("Changes since previous scan")
+    if not (new_components or gone_components or prev_vulns or curr_vulns):
+        report.paragraph("No component or vulnerability changes against the previous graph.")
+        return
+    if new_components:
+        report.paragraph("New since the previous scan: " + ", ".join(f"`{c}`" for c in new_components))
+    if gone_components:
+        report.paragraph("No longer present: " + ", ".join(f"`{c}`" for c in gone_components))
+    new_vulns = sorted(curr_vulns - prev_vulns)
+    resolved = sorted(prev_vulns - curr_vulns)
+    if new_vulns:
+        report.paragraph("**New findings:**")
+        report.bullets([f"{component}: {label}" for component, label in new_vulns])
+    if resolved:
+        report.paragraph("Resolved since the previous scan (update worked / component gone): "
+                         + ", ".join(f"{component}: {label}" for component, label in resolved))
+
+
+def _fail_on_check(model, fail_on, suppressions):
+    """The --fail-on gate (F-10): returns a reason string or None."""
+    if fail_on == "none":
+        return None
+    risks = [r for r in model.risks() if not _suppressed(r, suppressions)]
+    if fail_on == "any":
+        if model.credentials():
+            return "working credentials were found"
+        if risks:
+            return f"{len(risks)} vulnerability finding(s)"
+        return None
+    threshold = _BAND_ORDER[fail_on]
+    for item in risks:
+        band = _severity_band(item.get("severity")) or "low"
+        if _BAND_ORDER[band] <= threshold:
+            return (f"{item['component']}: {item['name']} "
+                    f"(severity {item.get('severity') or 'unrated'})")
+    return None
 
 
 def main(argv=None):
@@ -362,6 +514,10 @@ def main(argv=None):
     exit_code = 0
     passive_results = {}
     model = confidence.ScanModel()
+    started = time.monotonic()
+    suppressions = config.load_lines(args.suppressions) if args.suppressions else []
+    if suppressions:
+        print(f"[*] {len(suppressions)} suppression pattern(s) loaded")
     try:
         # Cheap liveness gate: if even the homepage is unreachable, don't spend
         # minutes retrying every subsequent request against a dead host.
@@ -399,9 +555,37 @@ def main(argv=None):
         except Exception as e:
             print(f"[*] Post-scan analysis skipped: {e}")
         try:
-            _write_priorities(report, model)
+            _write_priorities(report, model, suppressions)
         except Exception as e:
             print(f"[*] Risk summary skipped: {e}")
+        if args.diff:
+            try:
+                _write_diff_section(report, model, args.diff, target)
+            except Exception as e:
+                print(f"[*] Diff section skipped: {e}")
+        try:
+            duration = time.monotonic() - started
+            metadata = [
+                ("Target", target),
+                ("WpBuddy", __version__),
+                ("Scanned", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                ("Duration", f"{duration:.1f}s"),
+                ("Profile", ("stealth " if args.stealth else "")
+                           + (f"audit={args.audit_code} ")
+                           + ("offline " if args.offline else "")
+                           + (f"persona={args.persona}" if args.persona else "persona=auto")),
+            ]
+            _write_exec_summary(report, model, metadata)
+        except Exception as e:
+            print(f"[*] Executive summary skipped: {e}")
+        fail_reason = None
+        try:
+            fail_reason = _fail_on_check(model, args.fail_on, suppressions)
+        except Exception as e:
+            print(f"[*] --fail-on check skipped: {e}")
+        if fail_reason:
+            exit_code = 1
+            print(f"[!] --fail-on {args.fail_on}: {fail_reason}")
         report.write(f"{output}.md")
         print(f"[*] Report saved: {output}.md")
         if args.json:

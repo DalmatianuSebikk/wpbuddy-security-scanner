@@ -2797,6 +2797,89 @@ def test_more_wp_config_variants_in_sensitive_list():
         assert path in files.CONTENT_SIGNATURES
 
 
+# ------------------------------------------------------------- reporting (F-10)
+
+def test_report_prepend_splices_after_title():
+    report = Report()
+    report.title("Main title")
+    report.paragraph("body")
+    front = Report()
+    front.section("Executive summary")
+    front.paragraph("short version")
+    report.prepend(front)
+    text = report.doc.write()
+    assert text.index("Executive summary") < text.index("body")
+
+
+def _cli_scan(tmp_path, monkeypatch, mock, extra_args, with_core_cve=True):
+    """Run an offline CLI scan against the mock; returns (exit_code, report text)."""
+    def fake_fetch(kind, slug):
+        if kind == "core" and with_core_cve:
+            return {"vulnerability": [
+                {"operator": {"max_version": "99.0", "max_operator": "lt"},
+                 "impact": {"cvss3": {"score": "9.8", "severity": "critical"}},
+                 "source": [{"name": "CVE-2020-99999",
+                             "description": "unauthenticated core issue"}]}]}
+        return None
+
+    monkeypatch.setattr(vulndb, "_fetch", fake_fetch)
+    monkeypatch.setattr(gather, "gather_from_wordpress", lambda *a, **k: None)
+    monkeypatch.chdir(tmp_path)
+    from wpbuddy import cli
+    output = tmp_path / "scan"
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--target", mock, "--pluginList", "", "--audit-code", "off",
+                  "--json", "--output", str(output)] + extra_args)
+    return exc.value.code, output
+
+
+def test_executive_summary_and_metadata(mock, tmp_path, monkeypatch):
+    code, output = _cli_scan(tmp_path, monkeypatch, mock, [])
+    assert code == 0
+    text = output.with_suffix(".md").read_text(encoding="utf-8")
+    assert text.index("Executive summary") < text.index("WordPress core version")
+    assert "WpBuddy" in text and "Duration" in text
+    assert "CVE-2020-99999" in text          # top risk inline
+    assert "audit=off" in text               # profile metadata
+
+
+def test_fail_on_gate_and_suppressions(mock, tmp_path, monkeypatch, capsys):
+    # critical finding present: --fail-on critical exits 1
+    code, _ = _cli_scan(tmp_path, monkeypatch, mock, ["--fail-on", "critical"])
+    assert code == 1
+    assert "fail-on critical" in capsys.readouterr().out
+
+    # suppressed finding no longer trips the gate
+    supp = tmp_path / "supp.txt"
+    supp.write_text("# known and accepted\ncore:wordpress:CVE-2020-99999\n"
+                    "CVE-2020-99999\n")
+    code, _ = _cli_scan(tmp_path, monkeypatch, mock,
+                        ["--fail-on", "critical", "--suppressions", str(supp)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "suppressed" in out
+
+    # --fail-on none (default behaviour) exits 0 despite the finding
+    code, _ = _cli_scan(tmp_path, monkeypatch, mock, ["--fail-on", "none"])
+    assert code == 0
+
+
+def test_diff_against_previous_graph(mock, tmp_path, monkeypatch):
+    # first scan records the critical CVE
+    code, first = _cli_scan(tmp_path, monkeypatch, mock, [])
+    assert code == 0
+
+    # second scan: the CVE is gone (DB answers clean) -> diff reports it resolved
+    code, second = _cli_scan(tmp_path, monkeypatch, mock,
+                             ["--diff", str(first.with_suffix(".json"))],
+                             with_core_cve=False)
+    assert code == 0
+    text = second.with_suffix(".md").read_text(encoding="utf-8")
+    assert "Changes since previous scan" in text
+    assert "Resolved since the previous scan" in text
+    assert "CVE-2020-99999" in text
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

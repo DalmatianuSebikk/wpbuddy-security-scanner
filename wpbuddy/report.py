@@ -76,6 +76,17 @@ class Report:
         else:
             self.doc.add(CodeBlock(text))
 
+    def prepend(self, other):
+        """Splice another report's nodes right after the title (F-10).
+
+        markdownmaker only appends; the executive summary must sit at the
+        top, so it is built in a separate document and inserted after the
+        first node (the H1) preserving each node's header level.
+        """
+        nodes = list(other.doc.nodes)
+        if nodes:
+            self.doc.nodes[1:1] = nodes
+
     def rule(self):
         self.doc.add(HorizontalRule())
 
