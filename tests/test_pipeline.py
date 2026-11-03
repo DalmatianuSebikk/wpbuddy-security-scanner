@@ -2947,6 +2947,66 @@ def test_poc_time_budget_stops_attempts(monkeypatch):
     assert out[0]["poc"]["verified"] is False  # template attached anyway
 
 
+# ------------------------------------------------------------- optional semgrep (F-12)
+
+def test_semgrep_rules_shipped():
+    from wpbuddy.codeaudit import semgrep
+    assert semgrep.RULES_PATH.is_file()
+    rules = semgrep.RULES_PATH.read_text(encoding="utf-8")
+    for rule_id in ("wpbuddy-unserialize-request", "wpbuddy-eval-decoded",
+                    "wpbuddy-preg-e-modifier"):
+        assert rule_id in rules
+
+
+def test_semgrep_findings_parsed_from_fake_binary(mock, tmp_path, monkeypatch):
+    """A fake semgrep binary on PATH produces merged analyzer-shaped findings;
+    --semgrep without a binary is skipped with a notice, never an error."""
+    import os
+    import stat
+    from urllib.parse import urlsplit
+
+    from wpbuddy import codeaudit
+    from wpbuddy.codeaudit import semgrep as sg
+
+    payload = {"results": [{
+        "check_id": "wpbuddy-unserialize-request",
+        "path": str(tmp_path / "scanned.php"),
+        "start": {"line": 7},
+        "extra": {"severity": "ERROR",
+                  "message": "unserialize() directly on request input",
+                  "lines": "unserialize($_GET['x']);"},
+    }]}
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "semgrep"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+
+    import json as _json
+    # the fake prints canned JSON on stdout
+    fake.write_text("#!/bin/sh\necho '" + _json.dumps(payload).replace("'", "'\\''") + "'\n")
+
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+    findings = sg.scan(tmp_path)
+    assert findings and findings[0]["rule"] == "wpbuddy-unserialize-request"
+    assert findings[0]["severity"] == "HIGH"
+    assert findings[0]["line"] == 7
+    assert findings[0]["snippet"].startswith("unserialize(")
+
+    # integration: codeaudit.run merges them when --semgrep is passed
+    monkeypatch.chdir(tmp_path)
+    _mirror_vuln_cache(tmp_path, urlsplit(mock).hostname)
+    monkeypatch.setattr(httpclient, "get", lambda url, **kw: FakeResp(404, "offline"))
+    args = SimpleNamespace(audit_code="target", verify_pocs=False,
+                           source_dir=None, semgrep=True)
+    audited = codeaudit.run(Report(), mock, {"plugins": {"vuln": "1.0"}}, args)
+    assert any(f["rule"] == "wpbuddy-unserialize-request" for f in audited["vuln"])
+
+    # no binary on PATH -> scan() reports None, run() still completes
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert sg.scan(tmp_path) is None
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

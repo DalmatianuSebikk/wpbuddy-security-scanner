@@ -1,0 +1,63 @@
+# WpBuddy bundled Semgrep rules (F-12).
+# Conservative request-input-to-sink rules mirroring the built-in analyzer,
+# run only when the operator passes --semgrep and has semgrep installed.
+rules:
+  - id: wpbuddy-unserialize-request
+    languages: [php]
+    severity: ERROR
+    message: unserialize() directly on request input - PHP object injection
+    pattern-either:
+      - pattern: unserialize($_REQUEST[...])
+      - pattern: unserialize($_GET[...])
+      - pattern: unserialize($_POST[...])
+      - pattern: unserialize($_COOKIE[...])
+
+  - id: wpbuddy-eval-decoded
+    languages: [php]
+    severity: ERROR
+    message: eval() over decoded/obfuscated payload - webshell pattern
+    pattern-either:
+      - pattern: eval(base64_decode(...))
+      - pattern: eval(gzinflate(...))
+      - pattern: eval(gzuncompress(...))
+      - pattern: eval(str_rot13(...))
+
+  - id: wpbuddy-include-request
+    languages: [php]
+    severity: ERROR
+    message: include/require of a path taken from request input - LFI/RFI
+    pattern-either:
+      - pattern: include($_REQUEST[...])
+      - pattern: include($_GET[...])
+      - pattern: include($_POST[...])
+      - pattern: require($_REQUEST[...])
+      - pattern: require($_GET[...])
+      - pattern: require($_POST[...])
+
+  - id: wpbuddy-exec-request
+    languages: [php]
+    severity: ERROR
+    message: OS command execution on request input
+    pattern-either:
+      - pattern: system($_REQUEST[...])
+      - pattern: system($_GET[...])
+      - pattern: system($_POST[...])
+      - pattern: exec($_REQUEST[...])
+      - pattern: shell_exec($_REQUEST[...])
+      - pattern: passthru($_REQUEST[...])
+
+  - id: wpbuddy-preg-e-modifier
+    languages: [php]
+    severity: ERROR
+    message: preg_replace() with the /e modifier executes the replacement as PHP code
+    pattern: preg_replace('/...e.../', ...)
+
+  - id: wpbuddy-remote-fetch-request
+    languages: [php]
+    severity: WARNING
+    message: remote fetch driven by request input - SSRF candidate
+    pattern-either:
+      - pattern: file_get_contents($_REQUEST[...])
+      - pattern: file_get_contents($_GET[...])
+      - pattern: wp_remote_get($_REQUEST[...])
+      - pattern: wp_remote_get($_GET[...])

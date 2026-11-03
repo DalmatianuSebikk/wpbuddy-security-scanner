@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 
 from .. import config
 from ..passive import files as passive_files  # listing finding (P1-7); no cycle
-from . import analyzer, deps, gather, malware, poc
+from . import analyzer, deps, gather, malware, poc, semgrep
 
 _MODES = ("auto", "target", "source", "off")
 
@@ -97,6 +97,10 @@ def run(report, target, passive_results, args):
             # malware/webshell/secret findings render in the same component
             # list (F-7); they are findings about the code itself
             findings += malware.scan(source)
+            if getattr(args, "semgrep", False):
+                extra = semgrep.scan(source)
+                if extra:
+                    findings += extra
             findings.sort(key=lambda f: (analyzer.SEVERITY_ORDER[f["severity"]],
                                          f["file"], f["line"]))
             if getattr(args, "verify_pocs", False) and findings:

@@ -146,6 +146,9 @@ Examples:
                         help="File of patterns (substring, case-insensitive) matched against "
                              "'component:name' of vulnerability findings; matches are excluded "
                              "from the priorities summary and --fail-on")
+    parser.add_argument("--semgrep", action="store_true",
+                        help="Code audit: additionally run the bundled Semgrep rule pack "
+                             "over gathered sources (optional: needs a semgrep binary on PATH)")
     parser.add_argument("--version", action="version", version=f"WpBuddy {__version__}")
     return parser
 
