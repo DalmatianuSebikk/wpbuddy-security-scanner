@@ -23,6 +23,12 @@ from . import analyzer, gather, poc
 
 _MODES = ("auto", "target", "source", "off")
 
+# Marker file recording HOW a cached component tree was produced. It is only
+# written after a successful gather and is what makes a cache entry trusted
+# (P0-3/P1-11): without it a partial mirror or dead extraction cannot be told
+# apart from a complete source, and the analyzer would walk the wrong layout.
+_ORIGIN_MARKER = ".origin"
+
 
 def run(report, target, passive_results, args):
     mode = getattr(args, "audit_code", "auto")
@@ -61,18 +67,21 @@ def run(report, target, passive_results, args):
             # must never be audited and reported as the 2.4 running now
             path = workdir / f"{kind}-{slug}-{version}" if version else \
                 workdir / f"{kind}-{slug}-unknown"
+            mirrored = False
             if version and path.exists():
-                source = path
-                origin = f"cached from a previous scan ({version})"
+                source, origin, mirrored = _load_cached_source(path, version)
             else:
+                source, origin = None, None
+            if source is None:
                 source, origin, reason = _gather(mode, kind, slug, version, target, path,
                                                  source_dir=source_dir)
                 if source is None:
                     if reason:
                         unaudited.append((label, reason))
                     continue
+                mirrored = "mirrored" in origin
+                _mark_cache_origin(path, "mirrored" if mirrored else "official")
             findings = analyzer.analyze(source)
-            mirrored = "mirrored" in origin
             if getattr(args, "verify_pocs", False) and findings:
                 findings = poc.verify_findings(report, target, kind, findings, mirrored)
             _report_component(report, label, origin, source, findings)
@@ -106,6 +115,50 @@ def run(report, target, passive_results, args):
             f"the source line and the exact request; verified ones are marked. "
             f"Review every request before sending it to the target.")
     return audited
+
+
+def _load_cached_source(path, version):
+    """(source_dir, origin, mirrored) for a complete cached component tree.
+
+    Mirrors are analyzed from their `target/` subtree so finding paths start
+    at wp-content/... exactly like a fresh mirror (the double
+    wp-content/plugins/target/... PoC prefix of the old cache handling came
+    from walking the cache root instead). Returns (None, None, False) for a
+    cache we cannot classify - the caller re-gathers (P1-11).
+    """
+    how = _cache_kind(path)
+    if how == "mirrored":
+        return (path / "target",
+                f"**cached mirror** of the target's exposed listing (previous scan, {version})",
+                True)
+    if how == "official":
+        return (path / "official",
+                f"cached official source from a previous scan ({version})", False)
+    return None, None, False
+
+
+def _cache_kind(path):
+    """'mirrored', 'official' or None for a cache directory.
+
+    The .origin marker is authoritative (written only after a successful
+    gather). Marker-less caches predate it: a `target/` subtree can only be
+    a mirror, anything else is not trusted and re-gathered.
+    """
+    marker = path / _ORIGIN_MARKER
+    if marker.is_file():
+        how = marker.read_text(encoding="utf-8", errors="replace").strip().lower()
+        return how if how in ("mirrored", "official") else None
+    if (path / "target").is_dir():
+        return "mirrored"
+    return None
+
+
+def _mark_cache_origin(path, how):
+    """Record how this cache entry was produced - after a successful gather."""
+    try:
+        (path / _ORIGIN_MARKER).write_text(how + "\n", encoding="utf-8")
+    except OSError as e:
+        print(f"[!] Could not mark audit cache {path}: {e}")
 
 
 def _gather(mode, kind, slug, version, target, path, source_dir=None):

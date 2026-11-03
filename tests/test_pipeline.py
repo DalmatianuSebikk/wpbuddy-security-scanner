@@ -4,6 +4,7 @@ except where explicitly noted; vulnerability DB responses are stubbed)."""
 import json
 import re
 import zipfile
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -1550,6 +1551,56 @@ def test_cli_stealth_with_explicit_audit_target_warns(mock, tmp_path, monkeypatc
     out = capsys.readouterr().out
     assert "--audit-code target" in out
     assert "target requests" in out.lower() or "reach" in out.lower()
+
+
+# ------------------------------------------------------------- audit cache semantics (P0-3)
+
+def _mirror_vuln_cache(root, host, marker=True):
+    """Cache layout a previous scan left after mirroring plugin 'vuln' 1.0."""
+    php = root / "wpbuddy-audit" / host / "plugin-vuln-1.0" / "target" / \
+        "wp-content" / "plugins" / "vuln" / "vuln.php"
+    php.parent.mkdir(parents=True)
+    php.write_text('<?php\neval(base64_decode($_REQUEST["cmd"]));\n')
+    if marker:
+        (root / "wpbuddy-audit" / host / "plugin-vuln-1.0" / ".origin").write_text("mirrored\n")
+    return php
+
+
+def test_cached_mirror_keeps_mirror_semantics(mock, tmp_path, monkeypatch):
+    """A cached mirror is analyzed from its target/ subtree: finding paths
+    start at wp-content/ and PoC URLs carry no double prefix (the old code
+    walked the cache root, producing .../plugins/target/wp-content/plugins/...)."""
+    from types import SimpleNamespace as NS
+    from urllib.parse import urlsplit
+    from wpbuddy import codeaudit
+
+    monkeypatch.chdir(tmp_path)
+    host = urlsplit(mock).hostname
+    _mirror_vuln_cache(tmp_path, host, marker=True)
+    monkeypatch.setattr(httpclient, "get", lambda url, **kw: FakeResp(404, "offline"))
+
+    args = NS(audit_code="target", verify_pocs=True, source_dir=None)
+    findings = codeaudit.run(Report(), mock, {"plugins": {"vuln": "1.0"}}, args)["vuln"]
+    assert findings
+    assert all(f["file"].startswith("wp-content/") for f in findings)
+    poc_urls = [f["poc"]["poc"]["url"] for f in findings if f.get("poc")]
+    assert poc_urls
+    assert all(u == f"{mock}wp-content/plugins/vuln/vuln.php" for u in poc_urls)
+
+
+def test_cached_mirror_inferred_without_marker(mock, tmp_path, monkeypatch):
+    """Marker-less legacy caches with a target/ subtree are still mirrors."""
+    from types import SimpleNamespace as NS
+    from urllib.parse import urlsplit
+    from wpbuddy import codeaudit
+
+    monkeypatch.chdir(tmp_path)
+    _mirror_vuln_cache(tmp_path, urlsplit(mock).hostname, marker=False)
+    monkeypatch.setattr(httpclient, "get", lambda url, **kw: FakeResp(404, "offline"))
+
+    args = NS(audit_code="target", verify_pocs=False, source_dir=None)
+    findings = codeaudit.run(Report(), mock, {"plugins": {"vuln": "1.0"}}, args)["vuln"]
+    assert findings and findings[0]["file"].startswith("wp-content/")
 
 
 def test_cli_rejects_bad_target():
