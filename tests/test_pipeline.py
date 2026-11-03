@@ -2479,6 +2479,60 @@ def test_cli_bad_app_password_format_rejected():
     assert exc.value.code == 1
 
 
+# ------------------------------------------------------------- integrity diff (F-4)
+
+def _integrity_cache(tmp_path, host, slug="vuln", version="1.0", modified=True, added=True):
+    """Cache entry holding BOTH a mirror and an official tree for a plugin."""
+    cache = tmp_path / "wpbuddy-audit" / host / f"plugin-{slug}-{version}"
+    mirror_file = cache / "target" / "wp-content" / "plugins" / slug / f"{slug}.php"
+    mirror_file.parent.mkdir(parents=True)
+    mirror_file.write_text("<?php\n// deployed code\n")
+    official_file = cache / "official" / slug / f"{slug}.php"
+    official_file.parent.mkdir(parents=True)
+    official_file.write_text("<?php\n// deployed code\n"
+                             + ("// but patched by someone\n" if modified else ""))
+    if added:
+        extra = cache / "target" / "wp-content" / "plugins" / slug / "backdoor.php"
+        extra.write_text("<?php\n")
+    (cache / ".origin").write_text("mirrored\n")
+    return cache
+
+
+def test_integrity_diff_reports_modified_and_added(mock, tmp_path, monkeypatch):
+    """A mirrored plugin whose files differ from the official archive of the
+    same version is reported with the exact files."""
+    from urllib.parse import urlsplit
+
+    from wpbuddy import codeaudit
+    monkeypatch.chdir(tmp_path)
+    _integrity_cache(tmp_path, urlsplit(mock).hostname)
+    monkeypatch.setattr(httpclient, "get", lambda url, **kw: FakeResp(404, "offline"))
+
+    args = SimpleNamespace(audit_code="target", verify_pocs=False, source_dir=None)
+    report = Report()
+    codeaudit.run(report, mock, {"plugins": {"vuln": "1.0"}}, args)
+    text = report.doc.write()
+    assert "DIFFERS from the official distribution" in text
+    assert "modified: `vuln.php`" in text
+    assert "added" in text and "backdoor.php" in text
+
+
+def test_integrity_match_reports_clean(mock, tmp_path, monkeypatch):
+    from urllib.parse import urlsplit
+
+    from wpbuddy import codeaudit
+    monkeypatch.chdir(tmp_path)
+    _integrity_cache(tmp_path, urlsplit(mock).hostname, modified=False, added=False)
+    monkeypatch.setattr(httpclient, "get", lambda url, **kw: FakeResp(404, "offline"))
+
+    args = SimpleNamespace(audit_code="target", verify_pocs=False, source_dir=None)
+    report = Report()
+    codeaudit.run(report, mock, {"plugins": {"vuln": "1.0"}}, args)
+    text = report.doc.write()
+    assert "match the official 1.0 distribution byte-for-byte" in text
+    assert "DIFFERS" not in text
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

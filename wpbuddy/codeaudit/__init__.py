@@ -96,6 +96,8 @@ def run(report, target, passive_results, args):
             findings = analyzer.analyze(source)
             if getattr(args, "verify_pocs", False) and findings:
                 findings = poc.verify_findings(report, target, kind, findings, mirrored)
+            if mirrored and version:
+                _integrity_check(report, label, kind, slug, version, path)
             _report_component(report, label, origin, source, findings)
             audited[slug] = findings
             pack_entries += [
@@ -130,6 +132,73 @@ def run(report, target, passive_results, args):
             f"the source line and the exact request; verified ones are marked. "
             f"Review every request before sending it to the target.")
     return audited
+
+
+def _integrity_check(report, label, kind, slug, version, path):
+    """Modified-file detection (F-4): deployed mirror vs official archive.
+
+    Compares the mirrored production code with the official wordpress.org
+    distribution of the exact same version (fetched once into the same
+    cache entry; no extra target requests). Modified or added files are how
+    backdoors and nulled-plugin phones home survive updates.
+    """
+    official_root = path / "official"
+    if not official_root.is_dir():
+        source, _origin, _reason = gather.gather_from_wordpress(
+            kind, slug, version, official_root)
+        if not source:
+            return  # no official copy obtainable (commercial/custom) - nothing to diff
+        print(f"[*] Integrity: fetched official {kind} '{slug}' {version} for comparison")
+    base = official_root / slug
+    base = base if base.is_dir() else official_root
+    modified, added = _diff_trees(path / "target", base, kind, slug)
+    if modified or added:
+        print(f"[!] Integrity: {label} differs from the official distribution "
+              f"({len(modified)} modified, {len(added)} added)")
+        report.paragraph(f"**{label}: deployed code DIFFERS from the official "
+                         f"distribution** - {len(modified)} modified, {len(added)} added "
+                         f"file(s). Modified component files are how backdoors survive "
+                         f"updates; review every file listed:")
+        report.bullets([f"modified: `{rel}`" for rel in sorted(modified)[:15]]
+                       + [f"added (not in the official {version} archive): `{rel}`"
+                          for rel in sorted(added)[:15]])
+    else:
+        report.paragraph(f"{label}: mirrored files match the official {version} "
+                         f"distribution byte-for-byte - no tampering visible in "
+                         f"the mirrored set.")
+
+
+def _diff_trees(mirror_root, official_root, kind, slug, max_files=2000):
+    """(modified, added) relative paths between a deployed mirror and the
+    official archive. Only text-type files are compared - the mirror skips
+    binaries by design, so they would all read as 'removed'.
+    Paths normalize to the component root: mirror files live under
+    wp-content/<kind>s/<slug>/..., official ones under <slug>/....
+    """
+    import hashlib
+
+    def scan(root, strip):
+        out = {}
+        root = Path(root)
+        if not root.is_dir():
+            return out
+        for p in sorted(root.rglob("*"))[:max_files]:
+            if not p.is_file() or p.suffix.lower() not in gather.DOWNLOAD_EXTENSIONS:
+                continue
+            if p.stat().st_size > config.MAX_AUDIT_FILE_SIZE:
+                continue
+            rel = p.relative_to(root).as_posix()
+            if strip and rel.startswith(strip):
+                rel = rel[len(strip):]
+            out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+        return out
+
+    mirror = scan(mirror_root, f"wp-content/{kind}s/{slug}/")
+    official = scan(official_root, f"{slug}/")
+    modified = [rel for rel, digest in mirror.items()
+                if rel in official and official[rel] != digest]
+    added = [rel for rel in mirror if rel not in official]
+    return modified, added
 
 
 def _load_cached_source(path, version):
