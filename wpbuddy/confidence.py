@@ -200,7 +200,12 @@ class ScanModel:
         return [n for n in self._nodes.values() if n["type"] != "vulnerability"]
 
     def to_dict(self, target):
+        from . import __version__
+        # 'schema' versions the graph shape so tooling can migrate safely:
+        # 1 - nodes/edges as documented, credential nodes + schema field (P2-10)
         return {
+            "schema": 1,
+            "wpbuddy_version": __version__,
             "target": target,
             "nodes": list(self._nodes.values()),
             "edges": [{"from": "site", "to": n["id"], "relation": "runs"}

@@ -2249,6 +2249,30 @@ def test_ruff_clean_when_available():
     assert result.returncode == 0, result.stdout
 
 
+# ------------------------------------------------------------- repo hygiene bits (P2-10)
+
+def test_graph_has_schema_version():
+    model = confidence.ScanModel()
+    graph = model.to_dict("https://x/")
+    assert graph["schema"] == 1
+    assert graph["wpbuddy_version"]
+
+
+def test_timestamp_output_does_not_overwrite(mock, tmp_path, monkeypatch):
+    """--timestamp-output writes <output>-<stamp>.md and leaves the bare
+    name alone, so a second scan cannot clobber the first report."""
+    monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: None)
+    from wpbuddy import cli
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--target", mock, "--pluginList", "", "--audit-code", "off",
+                  "--timestamp-output", "--output", str(tmp_path / "scan")])
+    assert exc.value.code == 0
+    stamped = list(tmp_path.glob("scan-????????-??????.md"))
+    assert len(stamped) == 1
+    assert not (tmp_path / "scan.md").exists()
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

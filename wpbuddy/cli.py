@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+from datetime import datetime
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from . import __version__, active, codeaudit, confidence, config, httpclient, passive
@@ -66,6 +67,9 @@ Examples:
                              "or the full dictionary with --dict (default data/numeparola.txt)")
     parser.add_argument("--output", default="outputScan",
                         help="Output report path without extension (default: outputScan -> outputScan.md)")
+    parser.add_argument("--timestamp-output", action="store_true",
+                        help="Append a timestamp to the output name (outputScan-20261104-1930.md) "
+                             "so repeated scans never overwrite earlier reports")
     parser.add_argument("--json", action="store_true",
                         help="Also write <output>.json: the scan's knowledge graph - components, "
                              "versions, evidence sources, confidence tiers and vulnerabilities "
@@ -234,6 +238,10 @@ def main(argv=None):
             sys.exit(1)
 
     output = args.output[:-3] if args.output.endswith(".md") else args.output
+    if args.timestamp_output:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        output = f"{output}-{stamp}"
+        print(f"[*] Timestamped output: {output}.md")
 
     print(f"WpBuddy {__version__} - target: {target}")
     if args.stealth:
