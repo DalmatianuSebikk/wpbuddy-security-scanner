@@ -50,6 +50,8 @@ def run(report, target, args, model=None):
     files.check_headers(report, target)
     dangling.check(report, target, artifacts.get("pages_html", ""))
     posture.check(report, target)
+    from . import extrachecks  # F-9: wp-cron, install pages, CORS, cookies
+    extrachecks.run(report, target)
     if config.AUTH_COOKIE or config.AUTH_BASIC:
         from . import authcheck  # deferred: only imported when creds exist
         authcheck.check(report, target)

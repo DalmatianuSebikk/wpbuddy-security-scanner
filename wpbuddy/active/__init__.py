@@ -7,6 +7,7 @@ login-error user validation, password spray) needs --access or --user.
 """
 
 from . import access, users, xmlrpc  # credentials: imported directly where used
+from . import extrachecks as extra_active
 
 
 def run(report, target, args, dict_list=None, model=None):
@@ -22,4 +23,5 @@ def run(report, target, args, dict_list=None, model=None):
     if getattr(args, "access", False) or args.user:
         access.run_access(report, target, args, found_users, xmlrpc_alive,
                           dict_list=dict_list, model=model)
+    extra_active.run(report, target)
     report.rule()

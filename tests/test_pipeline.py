@@ -2726,6 +2726,77 @@ def test_posture_report_rendering(monkeypatch):
     assert "Email posture skipped" in report.doc.write()
 
 
+# ------------------------------------------------------------- extra checks (F-9)
+
+def test_extra_passive_checks(monkeypatch):
+    """wp-cron reachability, install pages, CORS-with-credentials and cookie
+    flags each produce their finding from a faked response."""
+    from wpbuddy.passive import extrachecks
+
+    def route(url, **kw):
+        if url.endswith("wp-cron.php"):
+            return FakeResp(200, "")
+        if url.endswith("wp-admin/install.php"):
+            return FakeResp(200, '<form><input name="dbname"></form>')
+        if url.endswith("wp-admin/upgrade.php"):
+            return FakeResp(404, "")
+        if url.rstrip("/").endswith("/wp-json"):
+            resp = FakeResp(200, "{}", url=url)
+            resp.headers = {"Access-Control-Allow-Origin": "https://attacker.example",
+                            "Access-Control-Allow-Credentials": "true"}
+            return resp
+        if url.endswith("wp-login.php"):
+            resp = FakeResp(200, "form")
+            resp.headers = {"Set-Cookie": "wordpress_test_cookie=WP+Cookie+check; path=/"}
+            return resp
+        return FakeResp(404, "")
+
+    monkeypatch.setattr(httpclient, "get", route)
+    report = Report()
+    extrachecks.run(report, "https://x.example.com/")
+    text = report.doc.write()
+    assert "wp-cron.php is publicly reachable" in text
+    assert "wp-admin/install.php" in text and "remainder" in text
+    assert "reflects arbitrary CORS origins with credentials" in text
+    assert "HttpOnly" in text and "Secure" in text
+
+    # no credentials on the reflected origin -> informational, not alarmed
+    def route_plain(url, **kw):
+        if url.rstrip("/").endswith("/wp-json"):
+            resp = FakeResp(200, "{}")
+            resp.headers = {"Access-Control-Allow-Origin": "https://attacker.example"}
+            return resp
+        return FakeResp(404, "")
+
+    monkeypatch.setattr(httpclient, "get", route_plain)
+    report = Report()
+    extrachecks.check_rest_cors(report, "https://x.example.com/")
+    text = report.doc.write()
+    assert "documented default" in text
+    assert "with credentials" not in text
+
+
+def test_extra_active_admin_ajax_probe(monkeypatch):
+    from wpbuddy.active import extrachecks as active_extra
+
+    answering = FakeResp(200, '{"wp-refresh-nonces":{"nonce":"abc"}}')
+    monkeypatch.setattr(httpclient, "post", lambda url, **kw: answering)
+    report = Report()
+    active_extra.run(report, "https://x.example.com/")
+    assert "heartbeat POSTs" in report.doc.write()
+
+    monkeypatch.setattr(httpclient, "post", lambda url, **kw: FakeResp(403, ""))
+    report = Report()
+    active_extra.run(report, "https://x.example.com/")
+    assert "admin-ajax" not in report.doc.write()
+
+
+def test_more_wp_config_variants_in_sensitive_list():
+    for path in ("wp-config.php.txt", "wp-config.php.copy", "wp-config.old"):
+        assert path in files.SENSITIVE_FILES
+        assert path in files.CONTENT_SIGNATURES
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
