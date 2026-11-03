@@ -2533,6 +2533,45 @@ def test_integrity_match_reports_clean(mock, tmp_path, monkeypatch):
     assert "DIFFERS" not in text
 
 
+# ------------------------------------------------------------- asset versioning (F-5)
+
+def test_asset_versions_parser():
+    """?ver= on component assets yields versions; third-party hosts and
+    garbage numbers do not; majority wins on disagreement."""
+    from wpbuddy.passive import assets
+    html = (
+        '<link href="/wp-content/plugins/foo/css/a.css?ver=2.1.0">'
+        '<script src="/wp-content/plugins/foo/js/b.js?ver=2.1.0"></script>'
+        '<script src="/wp-content/plugins/foo/js/old.js?ver=1.9.9"></script>'
+        '<img src="https://cdn.other-domain.net/wp-content/plugins/foo/x.png?ver=9.9.9">'
+        '<link href="/wp-content/themes/kid/style.css?ver=1.2">'
+    )
+    found = assets.asset_versions(html, "site.example.com")
+    assert found[("plugins", "foo")] == "2.1.0"     # majority beats one stale asset
+    assert found[("themes", "kid")] == "1.2"
+    assert ("plugins", "x") not in found            # slug parse sanity
+    # the third-party asset referenced a plugin named foo too - must not
+    # have injected 9.9.9 into the counts
+    assert found[("plugins", "foo")] != "9.9.9"
+
+
+def test_plugin_version_from_assets_when_readme_unreadable(mock, monkeypatch):
+    """assetonly has no readme on the mock - its enqueued script's ?ver=
+    becomes the version (kind asset-ver, lower confidence than stable-tag)."""
+    from wpbuddy import passive
+    monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: None)
+    args = SimpleNamespace(pluginList="", enum_plugins=False, max_pages=5)
+
+    model = confidence.ScanModel()
+    results = passive.run(Report(), mock, args, model=model)
+    assert results["plugins"].get("assetonly") == "2.7.9"
+
+    node = model.to_dict(mock)["nodes"]
+    asset_node = [n for n in node if n.get("id") == "plugin:assetonly"][0]
+    assert asset_node["version"] == "2.7.9"
+    assert asset_node["version_source"] == "asset-ver"
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

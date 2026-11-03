@@ -19,7 +19,7 @@ graph exported with --json).
 """
 
 from .. import confidence, config, vulndb
-from . import content, core_version, dangling, files, fingerprints, readme, wprest
+from . import assets, content, core_version, dangling, files, fingerprints, readme, wprest
 
 
 def run(report, target, args, model=None):
@@ -32,10 +32,16 @@ def run(report, target, args, model=None):
     # one crawl shared by every consumer (plugin refs, fingerprints, dangling DNS)
     pages = content.crawl_page_urls(target, args.max_pages)
     refs, artifacts = content.discover_refs(pages, target)
+    # ?ver= parameters on component assets (F-5): version source of last
+    # resort when no readme is readable
+    from urllib.parse import urlparse as _urlparse
+    versions_from_assets = assets.asset_versions(artifacts.get("pages_html", ""),
+                                                 (_urlparse(target).hostname or "").lower())
 
     _scan_core(report, target, model)
-    results["plugins"] = _scan_plugins(report, target, args, namespaces, model, pages, refs, artifacts)
-    results["themes"] = _scan_themes(report, target, model, refs)
+    results["plugins"] = _scan_plugins(report, target, args, namespaces, model, pages,
+                                       refs, artifacts, versions_from_assets)
+    results["themes"] = _scan_themes(report, target, model, refs, versions_from_assets)
     _scan_rest(report, target, namespaces)
     files.check_robots(report, target)
     files.check_security_txt(report, target)
@@ -114,7 +120,8 @@ def _vuln_tier(presence, vuln, version_kind=None):
     return confidence.label(value)
 
 
-def _scan_plugins(report, target, args, namespaces, model, pages, refs, artifacts):
+def _scan_plugins(report, target, args, namespaces, model, pages, refs, artifacts,
+                  asset_versions_map=None):
     report.section("Plugins")
     manual = config.load_lines(args.pluginList) if args.pluginList else []
     fingerprinted = fingerprints.detect(artifacts, namespaces)
@@ -162,6 +169,13 @@ def _scan_plugins(report, target, args, namespaces, model, pages, refs, artifact
     versions, version_kinds = {}, {}
     for slug in sorted(presence):
         version, src, kind = readme.find_component_version(target, "plugins", slug)
+        if not version and asset_versions_map:
+            # no readable readme: the plugin's own enqueued assets still
+            # carry its version in ?ver= (F-5)
+            version = asset_versions_map.get(("plugins", slug))
+            if version:
+                kind = "asset-ver"
+                print(f"[*] Plugin {slug}: version {version} (asset ?ver=)")
         versions[slug] = version
         version_kinds[slug] = kind
         comp_score = confidence.score(presence[slug], version_kind=kind)
@@ -232,13 +246,14 @@ def _scan_plugins(report, target, args, namespaces, model, pages, refs, artifact
     return versions
 
 
-def _scan_themes(report, target, model, refs=None):
+def _scan_themes(report, target, model, refs=None, asset_versions_map=None):
     """Theme discovery over the SAME crawled pages the plugin scan used.
 
     Themes used to be scraped from the homepage alone (a second fetch!) -
     a child theme referenced only on an inner page was invisible (P1-8).
     `refs` is the refs dict from run()'s crawl; standalone callers without
-    one get the old homepage-only behaviour.
+    one get the old homepage-only behaviour. `asset_versions_map` supplies
+    ?ver=-based versions when style.css is unreadable (F-5).
     """
     report.section("Theme")
     if refs is None:
@@ -256,6 +271,11 @@ def _scan_themes(report, target, model, refs=None):
     versions = {}
     for slug in themes:
         version, src, kind = readme.find_component_version(target, "themes", slug)
+        if not version and asset_versions_map:
+            version = asset_versions_map.get(("themes", slug))
+            if version:
+                src, kind = "asset ?ver= parameter in crawled pages", "asset-ver"
+                print(f"[*] Theme {slug}: version {version} (asset ?ver=)")
         versions[slug] = version
         comp_score = confidence.score(["page-reference"], version_kind=kind)
         tier = confidence.tier_for(comp_score)

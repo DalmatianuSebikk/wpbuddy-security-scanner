@@ -49,6 +49,7 @@ PRESENCE_WEIGHTS = {
 VERSION_WEIGHTS = {
     "stable-tag": 25,       # explicit 'Stable tag:' / 'version X' line
     "style-css": 20,        # theme stylesheet 'Version:' header
+    "asset-ver": 12,        # the component's own ?ver= on enqueued assets (F-5)
     "changelog-anchor": 8,  # first bare number near a changelog/features anchor
 }
 
