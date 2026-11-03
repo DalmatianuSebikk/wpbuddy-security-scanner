@@ -10,6 +10,9 @@ False-positive control (learned the hard way against real plugins):
   CONTENTS are blanked (a minifier's 'exec(' token list is not a call) and
   comments are stripped. Double-quoted strings are kept because PHP
   interpolation inside them is exactly what the SQL rules must see.
+- rules whose signal lives INSIDE a single-quoted literal (the preg /e
+  modifier) opt into the raw line view instead - and must be anchored
+  tightly enough that neighbouring literals cannot match.
 - the csrf-no-nonce heuristic skips class/trait/interface definition files:
   they are included by WordPress, never routed directly, and their nonce
   checks live in the dispatcher (admin-ajax/REST), not the file.
@@ -76,69 +79,79 @@ def code_view(line):
 
 
 def _rules():
-    """(severity, id, description, compiled_regex, exclusion_regex_or_None) per line.
+    """(severity, id, description, compiled_regex, exclusion_regex_or_None, raw)
+    per line.
 
     The exclusion regex suppresses the rule when it also matches the line -
     e.g. $wpdb->query($wpdb->prepare(...)) is the SAFE WordPress idiom and
     must not trigger the SQL rule.
+
+    raw=True matches the line as-is instead of the code view. The preg-e
+    rule needs it: the /e modifier lives INSIDE a single-quoted pattern,
+    which code_view blanks ('/foo/e' becomes ''), so the rule would never
+    fire (P0-6). Raw rules must therefore be anchored tightly enough that
+    string-literal neighbours cannot false-positive.
     """
     return [
         ("CRITICAL", "backdoor-obfuscation",
          "eval() of obfuscated payload (base64/gzip/rot13) - classic webshell pattern",
          re.compile(r"eval\s*\(\s*(@?\w+\()? *(base64_decode|gzinflate|gzuncompress|str_rot13|urldecode)\s*\("),
-         None),
+         None, False),
         ("CRITICAL", "request-unserialize",
          "unserialize() directly on request input - PHP object injection / RCE",
          re.compile(r"unserialize\s*\([^)]*" + REQUEST_VAR),
-         re.compile(r"sanitize|esc_|wp_unslash|absint")),
+         re.compile(r"sanitize|esc_|wp_unslash|absint"), False),
         ("HIGH", "command-exec",
          "OS command execution function",
          re.compile(r"\b(system|exec|shell_exec|passthru|popen|proc_open)\s*\("),
-         re.compile(r"escapeshellarg|escapeshellcmd|WP_CLI|wp_shell")),
+         re.compile(r"escapeshellarg|escapeshellcmd|WP_CLI|wp_shell"), False),
         ("HIGH", "eval-usage", "eval() usage",
          re.compile(r"\beval\s*\("),
-         re.compile(r"base64_decode|gzinflate|gzuncompress|str_rot13")),
+         re.compile(r"base64_decode|gzinflate|gzuncompress|str_rot13"), False),
         ("HIGH", "create-function",
          "create_function() - equivalent to eval(), removed in PHP 8",
          re.compile(r"\bcreate_function\s*\("),
-         None),
+         None, False),
         ("HIGH", "preg-e-modifier",
          "preg_replace() with /e modifier executes the replacement as PHP code",
-         re.compile(r"preg_replace\s*\(\s*['\"][^'\"]*e[a-z]*['\"]\s*,"),
-         None),
+         # delimiter + modifier cluster right before the closing quote: the
+         # 'e' must trail a pattern delimiter ('/foo/e'), not merely appear
+         # somewhere in the pattern ('/red/' is not an /e pattern)
+         re.compile(r"preg_replace\s*\(\s*['\"][^'\"]*/[a-z]*e[a-z]*['\"]\s*,"),
+         None, True),
         ("HIGH", "sqli-request",
          "SQL built with request variables ($_GET/$_POST/$_REQUEST) - SQL injection",
          re.compile(r"\$wpdb->\w+\s*\([^;)]*" + REQUEST_VAR),
-         re.compile(r"->prepare\s*\(")),
+         re.compile(r"->prepare\s*\("), False),
         ("HIGH", "file-inclusion",
          "include/require of a path taken from request input - LFI/RFI",
          re.compile(r"\b(?:include|include_once|require|require_once)\s*\(?\s*[^;]*" + REQUEST_VAR),
-         re.compile(r"plugin_dir_path|ABSPATH|locate_template|get_template_part|load_template")),
+         re.compile(r"plugin_dir_path|ABSPATH|locate_template|get_template_part|load_template"), False),
         ("MEDIUM", "ssrf-request",
          "remote fetch driven by request input - SSRF",
          re.compile(r"(?:wp_remote_(?:get|post|head|request)|file_get_contents|curl_setopt|curl_exec)\s*\([^;)]*" + REQUEST_VAR),
-         re.compile(r"esc_url_raw|wp_http_validate_url|wp_safe_remote")),
+         re.compile(r"esc_url_raw|wp_http_validate_url|wp_safe_remote"), False),
         ("MEDIUM", "xss-echo",
          "echo/print of request input without escaping - reflected XSS",
          re.compile(r"\b(?:echo|print)\b[^;]*" + REQUEST_VAR),
-         re.compile(r"esc_html|esc_attr|esc_url|wp_kses|sanitize|\b(?:int|integer|float|bool)\s*\(|absint")),
+         re.compile(r"esc_html|esc_attr|esc_url|wp_kses|sanitize|\b(?:int|integer|float|bool)\s*\(|absint"), False),
         ("LOW", "sqli-no-prepare",
          "SQL with string interpolation and no ->prepare() on the line - review whether "
          "the interpolated values can be attacker-controlled (internal constants are fine)",
          re.compile(r"\$wpdb->(?:query|get_var|get_row|get_results)\s*\([^;]*(?:\.\s*\$|\{\$|\$[A-Za-z_])"),
-         re.compile(r"->prepare\s*\(|" + REQUEST_VAR)),
+         re.compile(r"->prepare\s*\(|" + REQUEST_VAR), False),
         ("LOW", "include-variable",
          "include/require with a variable path - usually an autoloader or template "
          "loader; review only if the path can be influenced from input",
          re.compile(r"\b(?:include|include_once|require|require_once)\s*\(?\s*\$"),
-         re.compile(r"plugin_dir_path|ABSPATH|locate_template|get_template_part|load_template")),
+         re.compile(r"plugin_dir_path|ABSPATH|locate_template|get_template_part|load_template"), False),
         ("LOW", "extract-usage",
          "extract() overwrites local variables (historically $_REQUEST extracts)",
          re.compile(r"\bextract\s*\("),
-         re.compile(r"EXTR_SKIP|EXTR_PREFIX")),
+         re.compile(r"EXTR_SKIP|EXTR_PREFIX"), False),
         ("INFO", "suppress-errors", "error suppression operator @ (hides failures)",
          re.compile(r"@\s*\$\w+->"),
-         None),
+         None, False),
     ]
 
 
@@ -200,12 +213,13 @@ def _scan_file(rel, lines, rules):
         if not stripped or stripped.startswith(("*", "//", "#")):
             continue
         code = code_view(stripped)
-        for severity, rule_id, description, rx, exclude in rules:
+        for severity, rule_id, description, rx, exclude, raw in rules:
+            view = stripped if raw else code
             if per_rule_counts.get(rule_id, 0) >= MAX_FINDINGS_PER_RULE_PER_FILE:
                 continue
-            if exclude and exclude.search(code):
+            if exclude and exclude.search(view):
                 continue
-            if rx.search(code):
+            if rx.search(view):
                 findings.append(_finding(severity, rule_id, description, rel, lineno, stripped))
                 per_rule_counts[rule_id] = per_rule_counts.get(rule_id, 0) + 1
 

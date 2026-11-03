@@ -1688,6 +1688,37 @@ def test_plugin_report_failure_not_clean(monkeypatch):
     assert "not present in the vulnerability database" not in text
 
 
+def test_analyzer_preg_e_modifier_single_quoted(tmp_path):
+    """The /e modifier sits inside a single-quoted pattern, which code_view
+    blanks - the rule must still fire (P0-6), without loosening the
+    string-literal controls for other rules."""
+
+    def scan(name, code):
+        case = tmp_path / name
+        case.mkdir()
+        (case / "case.php").write_text(code)
+        return analyzer.analyze(case)
+
+    findings = scan("e", '<?php\necho preg_replace(\'/foo/e\', \'$1\', $y);\n')
+    assert any(f["rule"] == "preg-e-modifier" and f["severity"] == "HIGH" for f in findings)
+
+    # same pattern without /e is not a finding
+    assert not any(f["rule"] == "preg-e-modifier"
+                   for f in scan("noe", '<?php\necho preg_replace(\'/foo/\', \'b\', $y);\n'))
+
+    # 'e' merely appearing in the pattern ('/red/') is not an /e modifier
+    assert not any(f["rule"] == "preg-e-modifier"
+                   for f in scan("red", '<?php\necho preg_replace(\'/red/\', \'b\', $y);\n'))
+
+    # the double-quoted case keeps working (through the raw view now)
+    assert any(f["rule"] == "preg-e-modifier"
+               for f in scan("dq", '<?php\necho preg_replace("/foo/e", "$1", $y);\n'))
+
+    # minifier token lists of the rule text itself are still not calls
+    assert not any(f["rule"] == "preg-e-modifier"
+                   for f in scan("tokens", '<?php\n$preserve = array(\'preg_replace(\', \'/e/\');\n'))
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
