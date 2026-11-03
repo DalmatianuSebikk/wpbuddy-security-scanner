@@ -88,7 +88,7 @@ pytest -q
 
 ## P1 — false positives / false negatives
 
-### [ ] P1-1 — Advisory bounds that include the installed version must become `bounded`
+### [x] P1-1 — Advisory bounds that include the installed version must become `bounded` (e786eb8)
 
 - **Files:** `wpbuddy/vulndb.py:168-212`
 - **Current:** `_upper_bounds` is only used to demote to `contradicted` when every bound excludes the version. A matching bound leaves the basis at `assumed` (−20 confidence), so dozens of clearly bounded findings render as `[ASSUMED]`.
@@ -96,14 +96,14 @@ pytest -q
 - **Acceptance test:** installed `6.6.8` with title “WordPress <= 6.9.1” → `bounded`; with “<= 6.5.0” → `contradicted`; multiple bounds where one includes the version → `bounded`.
 - **Note:** this changes scoring only; update any test asserting `assumed` for title-bounded cases.
 
-### [ ] P1-2 — Slug enumeration must reject challenge/soft-404 200s
+### [x] P1-2 — Slug enumeration must reject challenge/soft-404 200s (84c15d9)
 
 - **Files:** `wpbuddy/active/enumerate.py:55-67`
 - **Current:** any HTTP 200 counts as installed; a WAF 200 interstitial installed every slug.
 - **Fix:** for a 200 answer, call `passive.files.response_is_junk(resp, target)` and only count when false. Compute the junk/soft-404 baseline once before the loop (it is cached anyway).
 - **Acceptance test:** mock handler returns the challenge body with 200 for every readme probe → zero installed; a real readme body → installed.
 
-### [ ] P1-3 — Tighten `response_is_junk` so real readmes survive
+### [x] P1-3 — Tighten `response_is_junk` so real readmes survive (ae58e69)
 
 - **Files:** `wpbuddy/passive/files.py:97-103, 287-299`
 - **Current:** any of “not found”, “access denied”, “one moment”, etc. anywhere in the first 4000 bytes is junk. A real changelog line “Link not found fixed” discards the readme.
@@ -113,46 +113,46 @@ pytest -q
   Keep the baseline match as the primary signal. Challenge detection must still work for the existing tests.
 - **Acceptance test:** the “Stable tag: 2.1 … Link not found fixed” readme passes; a Cloudflare “One moment, please…” page fails; a 404-article does not pass.
 
-### [ ] P1-4 — Do not report HSTS as missing on plain HTTP
+### [x] P1-4 — Do not report HSTS as missing on plain HTTP (070c87a)
 
 - **Files:** `wpbuddy/passive/files.py:34-40, 110-134`
 - **Fix:** build the expected header set per scheme; skip `Strict-Transport-Security` when the target scheme is `http`. Mention in the section that HTTPS is required.
 - **Acceptance test:** `http://x/` output does not list HSTS; `https://x/` does.
 
-### [ ] P1-5 — Strip `www` from spray password templates
+### [x] P1-5 — Strip `www` from spray password templates (ae4c552)
 
 - **Files:** `wpbuddy/active/access.py:84-92`
 - **Fix:** normalize the host label: lowercase, strip a leading `www.`, drop everything after the first `.`, fall back to `target`.
 - **Acceptance test:** `spray_candidates("https://www.example.com/")` starts with `example<year>!`, not `www<year>!`.
 
-### [ ] P1-6 — `--audit-code target` must explain failures and honor `--source-dir`
+### [x] P1-6 — `--audit-code target` must explain failures and honor `--source-dir` (79e42bd)
 
 - **Files:** `wpbuddy/codeaudit/__init__.py:111-128`
 - **Current:** no listing → `(None, None, None)` and the component silently disappears. `target` mode never consults `source_dir`.
 - **Fix:** return `"no-listing"` as the reason when target mode finds nothing, and add it to `_GATHER_REASONS`. In target mode, after a failed listing, still try `gather_from_wordpress(..., source_dir=...)` **only** for the operator archive (not wordpress.org) — or document that target mode is listing-only and make `--source-dir` imply a fallback. Pick one and test it.
 - **Acceptance test:** target mode + no listing → unaudited bullet naming the component; `--source-dir` with an exact archive is used even in target mode.
 
-### [ ] P1-7 — Report exposed directory listings as a real finding
+### [x] P1-7 — Report exposed directory listings as a real finding (565d8fd)
 
 - **Files:** `wpbuddy/passive/files.py:398-409`; `wpbuddy/codeaudit/__init__.py:113-118`
 - **Current:** `check_directory_listing` is dead; the only trace is a log line and the audit origin string.
 - **Fix:** call it for every discovered component in the passive phase (or once per component during audit), and add a report bullet with severity/recommendation (“disable `Options -Indexes` / block listing”). The section should be its own finding, not just audit provenance.
 - **Acceptance test:** mock listing under `wp-content/plugins/<slug>/` → report contains a directory-listing finding with the URL.
 
-### [ ] P1-8 — Crawl for themes like plugins (no homepage-only shortcut)
+### [x] P1-8 — Crawl for themes like plugins (no homepage-only shortcut) (7a4f2b6)
 
 - **Files:** `wpbuddy/passive/__init__.py:220-264`
 - **Fix:** pass the already-crawled pages into `_scan_themes` instead of re-fetching only the homepage. Reuse the `refs`/`artifacts` from `run()`.
 - **Acceptance test:** mock page that references a theme only on an inner page → theme discovered.
 
-### [ ] P1-9 — 2FA-safe login success detection
+### [x] P1-9 — 2FA-safe login success detection (d70e40b)
 
 - **Files:** `wpbuddy/active/credentials.py:42-49`
 - **Current:** any final URL containing `wp-login.php` means failure; a 2FA challenge after a correct password is reported as a wrong password.
 - **Fix:** success if the chain reached `/wp-admin` (history or final URL), or if the final `wp-login.php` response is a challenge rather than the login form. Detect challenge markers (`two-factor`, `2fa`, `verification code`, `authenticator`) and a missing password field; add a distinct “credentials valid, MFA pending” result.
 - **Acceptance test:** mock returns redirect → `wp-login.php?action=2fa` with a code field → reported as valid-with-MFA, not failed.
 
-### [ ] P1-10 — Ship package data and fix the version metadata
+### [x] P1-10 — Ship package data and fix the version metadata (5949d4a)
 
 - **Files:** `pyproject.toml:2-3, 8-12, 28-29`; `wpbuddy/config.py:6`
 - **Fix:**
@@ -162,7 +162,7 @@ pytest -q
 - **Acceptance test:** `uv build --wheel`, inspect the zip: all three data files present, metadata version equals `wpbuddy.__version__`; run a scan from a temp CWD using only the installed wheel (no repo `data/`).
 - **Note:** the review confirmed the wheel currently has **zero** data files and version `0.2.0` while `__init__.py` says `0.3.0`.
 
-### [ ] P1-11 — Do not trust a partial cache; clean failed extractions
+### [x] P1-11 — Do not trust a partial cache; clean failed extractions (6d48b21)
 
 - **Files:** `wpbuddy/codeaudit/__init__.py:62-66`; `wpbuddy/codeaudit/gather.py:188-200, 220-235`
 - **Fix:** only treat a cache directory as valid when it is complete (marker file written after success, P0-3). On `BadZipFile`/`OSError` or an interrupted download, remove the destination subtree. A partial mirror (some files fetched) must not be labelled a full source; either retry the official source or add a “partial” label.
