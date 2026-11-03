@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+import time
 from datetime import datetime
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
@@ -122,6 +123,9 @@ Examples:
                         help="Directory of operator-provided component archives for code the "
                              "audit cannot download (commercial plugins, custom themes): "
                              "named {kind}-{slug}-{version}.zip or {slug}-{version}.zip")
+    parser.add_argument("--offline", action="store_true",
+                        help="Serve vulnerability lookups from the local cache only - no requests "
+                             "to wpvulnerability.net (prime it first with: wpbuddy db update)")
     parser.add_argument("--version", action="version", version=f"WpBuddy {__version__}")
     return parser
 
@@ -179,7 +183,56 @@ def explicitly_passed(argv, flag):
     return any(arg == flag or arg.startswith(flag + "=") for arg in (argv if argv is not None else sys.argv[1:]))
 
 
+def _run_db_command(argv):
+    """`wpbuddy db status|update` - manage the local vulnerability cache (F-1).
+
+    Kept as a tiny hand-rolled dispatch (checked before the flat scan parser)
+    so the existing flag interface is untouched; a full subcommand split is
+    roadmap work, not this feature.
+    """
+    from . import vulncache, vulndb
+    parser = argparse.ArgumentParser(prog="wpbuddy db", description="Local vulnerability-database cache")
+    sub = parser.add_subparsers(dest="db_command", required=True)
+    sub.add_parser("status", help="Show what is cached and how old it is")
+    sub.add_parser("update", help="Re-fetch every cached entry now")
+    args = parser.parse_args(argv)
+
+    cached = vulncache.entries()
+    if args.db_command == "status":
+        counts = vulncache.counts()
+        if not cached:
+            print(f"Cache is empty ({vulncache.cache_path()}); it fills as you scan, "
+                  "or run: wpbuddy db update")
+            return
+        print(f"Cache: {vulncache.cache_path()} (schema v{vulncache.SCHEMA_VERSION})")
+        for kind in sorted(counts):
+            by_status = ", ".join(f"{n} {status}" for status, n in sorted(counts[kind].items()))
+            print(f"  {kind}: {by_status}")
+        ages = [row[3] for row in cached]
+        print(f"  oldest entry: {(time.time() - min(ages)) / 3600:.1f}h ago, "
+              f"newest: {(time.time() - max(ages)) / 3600:.1f}h ago "
+              f"(TTL {vulncache.DEFAULT_TTL // 3600}h)")
+        return
+
+    if not cached:
+        print("Cache is empty - nothing to update (scan something first).")
+        return
+    ok = fail = 0
+    for kind, slug, _status, _age in cached:
+        if vulndb.refresh_entry(kind, slug) is None:
+            fail += 1
+        else:
+            ok += 1
+    print(f"Refreshed {ok} entr{'y' if ok == 1 else 'ies'}"
+          + (f", {fail} failed" if fail else ""))
+
+
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "db":
+        _run_db_command(argv[1:])
+        sys.exit(0)
+
     parser = build_parser()
     args = parser.parse_args(argv)
     _validate_numeric_args(parser, args)
@@ -220,6 +273,7 @@ def main(argv=None):
     config.REQUEST_DELAY = args.delay
     config.REQUEST_JITTER = args.jitter if args.jitter is not None else (1.5 if args.covert else 0.0)
     config.EVADE = not args.no_evade
+    config.OFFLINE = args.offline
     httpclient.init_networking(persona=args.persona, proxy=args.proxy, impersonate=args.covert)
 
     # Keep the original behaviour: fall back to the shipped plugin list.

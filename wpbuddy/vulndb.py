@@ -23,7 +23,7 @@ import os
 import re
 import time
 
-from . import httpclient
+from . import config, httpclient, vulncache
 from .versioning import compare_versions, major_minor
 
 API_BASE = "https://www.wpvulnerability.net"
@@ -104,20 +104,67 @@ def _fetch(kind, slug):
     slug), 'unreachable' (transport/JSON/API failure). A caller must never
     read an outage as an empty result - "site is clean" off a dead API is
     the worst failure mode this module has (P0-4).
+
+    The local cache (F-1) is consulted first: fresh entries are served
+    without network, --offline serves any-age entries only, and a network
+    failure falls back to a stale entry instead of failing the lookup.
     """
+    if getattr(config, "OFFLINE", False):
+        cached = vulncache.get(kind, slug, max_age=None)
+        if cached is not None:
+            return cached
+        return None, "unreachable"  # offline and not cached: cannot answer
+
+    cached = vulncache.get(kind, slug)
+    if cached is not None:
+        return cached
+
     resp = httpclient.get(f"{API_BASE}/{kind}/{slug}/")
     if resp is None:
-        return None, "unreachable"
+        return _stale_or_unreachable(kind, slug)
     try:
         payload = resp.json()
     except ValueError:
-        return None, "unreachable"
+        return _stale_or_unreachable(kind, slug)
     if not isinstance(payload, dict) or payload.get("error"):
+        vulncache.put(kind, slug, "not-found", None)
         return None, "not-found"
     data = payload.get("data")
     if not isinstance(data, dict):
+        vulncache.put(kind, slug, "not-found", None)
         return None, "not-found"
+    vulncache.put(kind, slug, "ok", data)
     return data, "ok"
+
+
+def _stale_or_unreachable(kind, slug):
+    """A dead API must not read as a dead database: serve a stale cached
+    answer when one exists, else report unreachable."""
+    stale = vulncache.get(kind, slug, max_age=None)
+    if stale is not None:
+        print(f"[*] Vulnerability API unreachable; serving cached answer for {kind} '{slug}'")
+        return stale
+    return None, "unreachable"
+
+
+def refresh_entry(kind, slug):
+    """Bypass the cache read, re-fetch one entry, store it (wpbuddy db update)."""
+    resp = httpclient.get(f"{API_BASE}/{kind}/{slug}/", retries=1)
+    if resp is None:
+        return None
+    try:
+        payload = resp.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict) or payload.get("error"):
+        vulncache.put(kind, slug, "not-found", None)
+        return "not-found"
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        vulncache.put(kind, slug, "not-found", None)
+        return "not-found"
+    vulncache.put(kind, slug, "ok", data)
+    return "ok"
 
 
 def _lookup(kind, slug):

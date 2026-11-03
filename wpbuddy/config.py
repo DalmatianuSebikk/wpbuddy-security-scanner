@@ -32,6 +32,11 @@ EVADE = True              # retry WAF-blocked probes through path obfuscation (-
 # target's.
 TARGET_HOST = None
 
+# Vulnerability-database cache (F-1): path override for tests / sandboxes,
+# and the offline switch (--offline serves cached answers only).
+VULNDB_CACHE = None
+OFFLINE = False
+
 # Passive crawling
 MAX_CRAWL_PAGES = 5
 

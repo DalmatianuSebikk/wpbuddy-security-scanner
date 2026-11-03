@@ -17,7 +17,7 @@ from wpbuddy.passive import errorpages, files
 
 
 @pytest.fixture(autouse=True)
-def _isolate_scan_state():
+def _isolate_scan_state(tmp_path):
     """Reset and later restore every piece of shared scan state."""
     config_snapshot = {key: copy.copy(value) for key, value in vars(config).items()
                        if not key.startswith("__")}
@@ -27,6 +27,10 @@ def _isolate_scan_state():
         "_rate_limit_backoff": httpclient._rate_limit_backoff,
         "_inspect_warned": httpclient._inspect_warned,
     }
+
+    # vulnerability-cache isolation: never read/write the developer's real
+    # ~/.wpbuddy cache from a test (F-1)
+    config.VULNDB_CACHE = tmp_path / "vulndb-test.sqlite3"
 
     files.reset()
     waf.reset()

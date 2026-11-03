@@ -3,6 +3,7 @@ except where explicitly noted; vulnerability DB responses are stubbed)."""
 
 import json
 import re
+import time
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -157,6 +158,9 @@ class FakeResp:
         self.content = body.encode()
         self.headers = {"Location": location} if location else {}
         self.url = url
+
+    def json(self):
+        return json.loads(self.text)
 
 
 SOFT_404_BODY = "<html><body><h1>Oops, nothing here</h1><p>page not found</p></body></html>"
@@ -2255,6 +2259,100 @@ def test_timestamp_output_does_not_overwrite(mock, tmp_path, monkeypatch):
     stamped = list(tmp_path.glob("scan-????????-??????.md"))
     assert len(stamped) == 1
     assert not (tmp_path / "scan.md").exists()
+
+
+# ================================================================ features (F-*)
+
+# ------------------------------------------------------------- local vuln DB (F-1)
+
+def test_vulncache_roundtrip_ttl_and_schema(tmp_path, monkeypatch):
+    from wpbuddy import config, vulncache
+    monkeypatch.setattr(config, "VULNDB_CACHE", tmp_path / "c.sqlite3")
+
+    vulncache.put("plugin", "p1", "ok", {"vulnerability": []})
+    assert vulncache.get("plugin", "p1") == ({"vulnerability": []}, "ok")
+
+    vulncache.put("plugin", "gone", "not-found", None)
+    assert vulncache.get("plugin", "gone") == (None, "not-found")
+
+    # TTL expiry: an old entry is stale...
+    with vulncache._connect() as conn:
+        conn.execute("UPDATE lookups SET fetched_at = ?", (time.time() - 10 * 86400,))
+    assert vulncache.get("plugin", "p1") is None
+    # ...but still served when any age is accepted (offline / outage fallback)
+    assert vulncache.get("plugin", "p1", max_age=None) == ({"vulnerability": []}, "ok")
+
+    # entries from an unknown future schema are ignored, not migrated
+    with vulncache._connect() as conn:
+        conn.execute("UPDATE lookups SET schema_version = 99")
+    assert vulncache.get("plugin", "p1", max_age=None) is None
+
+
+def test_offline_lookups_served_from_cache(tmp_path, monkeypatch):
+    """--offline: cached answers served with zero network; a miss reads as
+    unreachable, never as 'no vulnerabilities'."""
+    from wpbuddy import config, vulncache, vulndb
+    monkeypatch.setattr(config, "VULNDB_CACHE", tmp_path / "c.sqlite3")
+    monkeypatch.setattr(config, "OFFLINE", True)
+
+    def no_network(*a, **k):
+        raise AssertionError("offline mode must not touch the network")
+
+    monkeypatch.setattr(httpclient, "get", no_network)
+    monkeypatch.setattr(httpclient, "SESSION", None)
+
+    vulncache.put("plugin", "cached", "ok", {"vulnerability": None})
+    data, status = vulndb._lookup("plugin", "cached")
+    assert status == "ok" and data == {"vulnerability": None}
+
+    data, status = vulndb._lookup("plugin", "missing")
+    assert data is None and status == "unreachable"
+
+
+def test_network_failure_falls_back_to_stale_cache(tmp_path, monkeypatch):
+    from wpbuddy import config, vulncache
+    monkeypatch.setattr(config, "VULNDB_CACHE", tmp_path / "c.sqlite3")
+    vulncache.put("plugin", "p", "ok", {"vulnerability": ["x"]})
+    with vulncache._connect() as conn:   # age it past the TTL
+        conn.execute("UPDATE lookups SET fetched_at = ?", (time.time() - 10 * 86400,))
+
+    monkeypatch.setattr(httpclient, "get", lambda url, **kw: None)  # API dead
+    from wpbuddy import vulndb
+    data, status = vulndb._lookup("plugin", "p")
+    assert status == "ok" and data == {"vulnerability": ["x"]}   # stale served
+
+
+def test_successful_lookups_populate_the_cache(tmp_path, monkeypatch):
+    from wpbuddy import config, vulncache
+    monkeypatch.setattr(config, "VULNDB_CACHE", tmp_path / "c.sqlite3")
+    monkeypatch.setattr(httpclient, "get",
+                        lambda url, **kw: FakeResp(200, '{"data": {"vulnerability": null}}'))
+    monkeypatch.setattr(httpclient, "SESSION", None)
+
+    from wpbuddy import vulndb
+    vulndb._lookup("plugin", "fresh")
+    assert vulncache.get("plugin", "fresh") == ({"vulnerability": None}, "ok")
+
+
+def test_cli_db_status_and_update(tmp_path, monkeypatch, capsys):
+    from wpbuddy import config, vulncache
+    monkeypatch.setattr(config, "VULNDB_CACHE", tmp_path / "c.sqlite3")
+    vulncache.put("plugin", "a", "ok", {})
+    vulncache.put("plugin", "b", "not-found", None)
+    vulncache.put("core", "6.4", "ok", {})
+
+    from wpbuddy import cli
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["db", "status"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "plugin" in out and "core" in out and "not-found" in out
+
+    monkeypatch.setattr(vulndb, "refresh_entry", lambda kind, slug: "ok")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["db", "update"])
+    assert exc.value.code == 0
+    assert "Refreshed 3" in capsys.readouterr().out
 
 
 def test_cli_rejects_bad_target():
