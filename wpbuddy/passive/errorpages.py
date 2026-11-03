@@ -42,6 +42,17 @@ SECURITY_HINTS = {
 _seen = OrderedDict()
 
 
+def _host_is_target(host):
+    """Same-site family (apex/www/subdomains) counts as the target (P0-7).
+
+    Mirrors wpbuddy.waf._host_is_target: exact-host matching disabled the
+    collector whenever the site redirects apex <-> www.
+    """
+    from .. import config
+    from .content import _same_site
+    return _same_site(host, config.TARGET_HOST)
+
+
 def inspect(resp):
     """Called by httpclient for every response; records interesting errors.
 
@@ -54,7 +65,7 @@ def inspect(resp):
         return
     if config.TARGET_HOST:
         host = (urlsplit(getattr(resp, "url", "") or "").hostname or "").lower()
-        if host and host != config.TARGET_HOST:
+        if host and not _host_is_target(host):
             return
     status = getattr(resp, "status_code", 0) or 0
     body = (resp.text or "")[:MAX_BODY_SCAN]

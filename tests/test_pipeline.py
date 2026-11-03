@@ -1719,6 +1719,43 @@ def test_analyzer_preg_e_modifier_single_quoted(tmp_path):
                    for f in scan("tokens", '<?php\n$preserve = array(\'preg_replace(\', \'/e/\');\n'))
 
 
+# ------------------------------------------------------------- same-site collectors (P0-7)
+
+def test_waf_and_errorpages_accept_same_site_hosts(monkeypatch):
+    """A site scanned at example.com but served from www.example.com must
+    still get WAF detection and error-page collection; third-party API
+    hosts must stay ignored."""
+    from wpbuddy import config, waf
+    from wpbuddy.passive import errorpages
+    waf.reset()
+    errorpages.reset()
+    monkeypatch.setattr(config, "TARGET_HOST", "example.com")
+
+    fatal = ("<html><body>Fatal error: call in "
+             "/home/u/public_html/wp-content/plugins/foo/x.php on line 3</body></html>")
+    resp = FakeResp(200, fatal, url="https://www.example.com/x")
+    resp.headers = {"Server": "cloudflare", "Cf-Ray": "abc123"}
+    waf.inspect_response(resp)
+    errorpages.inspect(resp)
+    assert "Cloudflare" in waf.detected()
+    assert len(errorpages.entries()) == 1
+
+    sub = FakeResp(500, fatal, url="https://static.example.com/y")
+    sub.headers = {"Server": "cloudflare"}
+    waf.inspect_response(sub)
+    errorpages.inspect(sub)
+    assert len(errorpages.entries()) == 2   # own CDN subdomain counts too
+
+    # third-party API hosts are still ignored
+    api = FakeResp(200, fatal, url="https://api.wordpress.org/x")
+    api.headers = {"Server": "cloudflare"}
+    waf.inspect_response(api)
+    errorpages.inspect(api)
+    assert len(errorpages.entries()) == 2
+    waf.reset()
+    errorpages.reset()
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

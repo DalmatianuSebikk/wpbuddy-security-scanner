@@ -45,6 +45,21 @@ _blocked_responses = 0
 _bypass_events = {}   # technique -> occurrences
 
 
+def _host_is_target(host):
+    """True for the target host itself and its own apex/www/subdomain family.
+
+    Scanning `https://example.com` while the site serves from
+    `www.example.com` used to disable WAF collection entirely (exact host
+    compare). Same registrable domain (passive.content._same_site) is the
+    site's own infrastructure; third-party API hosts
+    (wpvulnerability.net, NVD, wordpress.org) are on other registrable
+    domains and stay rejected. Imported lazily - passive.content pulls in
+    httpclient, which imports this module at call time only.
+    """
+    from .passive.content import _same_site
+    return _same_site(host, config.TARGET_HOST)
+
+
 def inspect_response(resp):
     """Called by httpclient for every response; keeps the fingerprint fresh.
 
@@ -56,7 +71,7 @@ def inspect_response(resp):
         return
     if config.TARGET_HOST:
         host = (urlsplit(getattr(resp, "url", "") or "").hostname or "").lower()
-        if host and host != config.TARGET_HOST:
+        if host and not _host_is_target(host):
             return
     headers = {k.lower(): (v or "") for k, v in (getattr(resp, "headers", None) or {}).items()}
     cookies = " ".join(getattr(resp, "cookies", None).keys() if getattr(resp, "cookies", None) else [])
