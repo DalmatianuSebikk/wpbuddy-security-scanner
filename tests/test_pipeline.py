@@ -2178,6 +2178,41 @@ def test_target_controlled_values_render_literally(monkeypatch):
     assert "%28" in out and "%20" in out       # link destination made markdown-safe
 
 
+# ------------------------------------------------------------- credentials in graph (P2-7)
+
+def test_credentials_reach_graph_and_can_be_masked(mock, tmp_path, monkeypatch, capsys):
+    """Found credentials become credential nodes (compromised-by edges) in
+    the knowledge graph; --mask-secrets hides them from console and report."""
+    wordlist = tmp_path / "pw.txt"
+    wordlist.write_text(f"{VALID_PASSWORD}\n")
+    enumerated = [("Admin Site", VALID_USER)]
+
+    args = SimpleNamespace(access=True, user=None, dict=False,
+                           passwordList=str(wordlist), via_xmlrpc=False,
+                           mask_secrets=False)
+    model = confidence.ScanModel()
+    report = Report()
+    access.run_access(report, mock, args, enumerated, xmlrpc_alive=False, model=model)
+    graph = model.to_dict(mock)
+    creds = [n for n in graph["nodes"] if n["type"] == "credential"]
+    assert any(n["user"] == VALID_USER and n["password"] == VALID_PASSWORD for n in creds)
+    relations = {(e["from"], e["to"], e["relation"]) for e in graph["edges"]}
+    assert any(frm == "site" and rel == "compromised-by" and to.startswith("credential:")
+               for frm, to, rel in relations)
+    text = report.doc.write()
+    assert VALID_PASSWORD in text                       # plaintext by default
+
+    args = SimpleNamespace(access=True, user=None, dict=False,
+                           passwordList=str(wordlist), via_xmlrpc=False,
+                           mask_secrets=True)
+    report = Report()
+    access.run_access(report, mock, args, enumerated, xmlrpc_alive=False, model=None)
+    text = report.doc.write()
+    assert VALID_PASSWORD not in text
+    assert "***masked***" in text
+    capsys.readouterr()
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

@@ -177,6 +177,25 @@ class ScanModel:
                             "relation": "affected-by"})
         return node_id
 
+    def add_credential(self, user, password, via=None):
+        """A discovered working credential: its own node plus a
+        'compromised-by' edge from the site (P2-7).
+
+        The graph stores what actually was found; console/report masking
+        (--mask-secrets) is a display concern of the callers.
+        """
+        count = sum(1 for n in self._nodes.values() if n["type"] == "credential")
+        node_id = f"credential:{count + 1}"
+        self._nodes[node_id] = {
+            "id": node_id, "type": "credential", "label": user,
+            "user": user, "password": password,
+        }
+        if via:
+            self._nodes[node_id]["via"] = via
+        self._edges.append({"from": "site", "to": node_id,
+                            "relation": "compromised-by"})
+        return node_id
+
     def components(self):
         return [n for n in self._nodes.values() if n["type"] != "vulnerability"]
 

@@ -71,6 +71,9 @@ Examples:
                         help="Also write <output>.json: the scan's knowledge graph - components, "
                              "versions, evidence sources, confidence tiers and vulnerabilities "
                              "as nodes/edges for later tooling")
+    parser.add_argument("--mask-secrets", action="store_true",
+                        help="Mask discovered passwords in console and Markdown output "
+                             "(the JSON knowledge graph keeps the real values for tooling)")
     parser.add_argument("--timeout", type=float, default=config.DEFAULT_TIMEOUT,
                         help="Per-request timeout in seconds (default: %(default)s)")
     parser.add_argument("--delay", type=float, default=0.0,
@@ -257,7 +260,7 @@ def main(argv=None):
 
         passive_results = passive.run(report, target, args, model=model)
         if not args.stealth:
-            active.run(report, target, args, dict_list=dict_list)
+            active.run(report, target, args, dict_list=dict_list, model=model)
         else:
             report.rule()
         codeaudit.run(report, target, passive_results, args)

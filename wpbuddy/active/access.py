@@ -168,7 +168,13 @@ def credentials_success(resp):
     return _login_succeeded(resp)
 
 
-def run_access(report, target, args, enumerated_users, xmlrpc_alive, dict_list=None):
+def _shown(secret, mask):
+    """Mask a secret for console/report display (--mask-secrets)."""
+    return "***masked***" if mask else secret
+
+
+def run_access(report, target, args, enumerated_users, xmlrpc_alive, dict_list=None,
+               model=None):
     """The full quiet-access assessment. Returns found credentials {user: password}."""
     report.section("Access assessment")
     report.paragraph("Quiet alternatives to brute force: registration check, login-error "
@@ -212,12 +218,18 @@ def run_access(report, target, args, enumerated_users, xmlrpc_alive, dict_list=N
                            mfa=mfa_users)
 
     if found:
+        mask = bool(getattr(args, "mask_secrets", False))
         for user, password in found.items():
-            print(f"[!] VALID CREDENTIALS: {user} / {password}")
+            print(f"[!] VALID CREDENTIALS: {user} / {_shown(password, mask)}")
         report.paragraph("**Valid credentials: "
-                         + ", ".join(f"`{u}` / `{p}`" for u, p in found.items())
+                         + ", ".join(f"`{u}` / `{_shown(p, mask)}`"
+                                     for u, p in found.items())
                          + f"** (via {'XML-RPC multicall' if via_xmlrpc else 'wp-login.php'}, "
                            f"{note})")
+        if model is not None:
+            for user, password in found.items():
+                model.add_credential(user, password,
+                                     via="xmlrpc-multicall" if via_xmlrpc else "wp-login")
         if mfa_users:
             print(f"[!] 2FA challenge pending for: {', '.join(sorted(mfa_users))} "
                   "(passwords are correct)")
