@@ -2621,6 +2621,51 @@ def test_dependency_sca_clean_tree(tmp_path):
     assert "guzzlehttp/guzzle 7.9.0" in report.doc.write()
 
 
+# ------------------------------------------------------------- malware/secret scan (F-7)
+
+def test_malware_scan_webshells_and_secrets(tmp_path):
+    """Shells, packed payloads and committed secrets surface as findings;
+    ordinary code stays silent."""
+    from wpbuddy.codeaudit import malware
+    tmp_path.joinpath("shell.php").write_text(
+        '<?php\n$auth_pass = "9f3a";\nsystem($_POST["cmd"]);\n')
+    tmp_path.joinpath("packed.php").write_text(
+        '<?php\neval(gzinflate(base64_decode($payload)));\n')
+    tmp_path.joinpath("leaked.php").write_text(
+        '<?php\ndefine("DB_PASSWORD", "s3cret-stuff");\n'
+        'echo "AKIAIOSFODNN7EXAMPLE";\n')
+    tmp_path.joinpath("key.txt").write_text(
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\n-----END RSA PRIVATE KEY-----\n")
+    tmp_path.joinpath("normal.php").write_text('<?php\necho "hello world";\n')
+
+    findings = malware.scan(tmp_path)
+    rules = {f["rule"] for f in findings}
+    assert {"malware-known-webshell", "malware-obfuscation-chain",
+            "secret-wp-salted", "secret-cloud-credentials",
+            "secret-private-key"} <= rules
+    assert all(f["line"] >= 1 and f["snippet"] for f in findings)
+    # ordinary code produced nothing
+    assert not any(f["file"] == "normal.php" for f in findings)
+
+
+def test_malware_findings_reach_component_report(mock, tmp_path, monkeypatch):
+    """A mirrored component containing a shell gets the malware finding in
+    its audit section."""
+    from urllib.parse import urlsplit
+
+    from wpbuddy import codeaudit
+    monkeypatch.chdir(tmp_path)
+    php = _mirror_vuln_cache(tmp_path, urlsplit(mock).hostname)
+    php.write_text('<?php\n$auth_pass = "x";\nsystem($_POST["cmd"]);\n')
+    monkeypatch.setattr(httpclient, "get", lambda url, **kw: FakeResp(404, "offline"))
+
+    args = SimpleNamespace(audit_code="target", verify_pocs=False, source_dir=None)
+    report = Report()
+    audited = codeaudit.run(report, mock, {"plugins": {"vuln": "1.0"}}, args)
+    assert any(f["rule"] == "malware-known-webshell" for f in audited["vuln"])
+    assert "malware-known-webshell" in report.doc.write()
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

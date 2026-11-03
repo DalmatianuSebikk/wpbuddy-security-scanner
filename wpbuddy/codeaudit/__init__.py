@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 
 from .. import config
 from ..passive import files as passive_files  # listing finding (P1-7); no cycle
-from . import analyzer, deps, gather, poc
+from . import analyzer, deps, gather, malware, poc
 
 _MODES = ("auto", "target", "source", "off")
 
@@ -94,6 +94,11 @@ def run(report, target, passive_results, args):
                 mirrored = "mirrored" in origin
                 _mark_cache_origin(path, "mirrored" if mirrored else "official")
             findings = analyzer.analyze(source)
+            # malware/webshell/secret findings render in the same component
+            # list (F-7); they are findings about the code itself
+            findings += malware.scan(source)
+            findings.sort(key=lambda f: (analyzer.SEVERITY_ORDER[f["severity"]],
+                                         f["file"], f["line"]))
             if getattr(args, "verify_pocs", False) and findings:
                 findings = poc.verify_findings(report, target, kind, findings, mirrored)
             if mirrored and version:
