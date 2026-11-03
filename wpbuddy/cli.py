@@ -60,7 +60,8 @@ Examples:
                         help="Restrict the access assessment to one username (also enables it)")
     parser.add_argument("--dict", action="store_true",
                         help="Opt into the loud path: full dictionary attack instead of the "
-                             "targeted spray (uses --passwordList, default numeparola.txt)")
+                             "targeted spray (uses --passwordList, default numeparola.txt). "
+                             "No effect without --access/--user - credential testing is opt-in")
     parser.add_argument("--passwordList",
                         help="Custom password list: spray candidates (default data/sprayPasswords.txt) "
                              "or the full dictionary with --dict (default data/numeparola.txt)")
@@ -176,6 +177,16 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     _validate_numeric_args(parser, args)
+
+    # Conflicting-flag warnings (P2-4): warn, never guess the operator's
+    # intent. --dict alone does NOT auto-enable the access assessment -
+    # credential testing is opt-in by design.
+    if args.stealth and (args.access or args.user or args.dict):
+        print("[!] Warning: --stealth runs the passive phase only - the credential "
+              "assessment (--access/--user/--dict) will NOT run in this scan")
+    if args.dict and not (args.access or args.user):
+        print("[!] Warning: --dict without --access/--user - the dictionary is not "
+              "used; credential testing only runs with --access or --user")
 
     target, error = _normalize_target(args.target)
     if error:

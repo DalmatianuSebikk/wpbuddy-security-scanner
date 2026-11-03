@@ -2070,6 +2070,29 @@ def test_cli_rejects_invalid_numeric_args(mock, flag, value, capsys):
     assert flag in capsys.readouterr().err
 
 
+# ------------------------------------------------------------- conflicting flags (P2-4)
+
+def test_cli_conflicting_flag_warnings(mock, tmp_path, monkeypatch, capsys):
+    """--stealth with credential flags and --dict without access both warn."""
+    from wpbuddy import cli
+    monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: None)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--target", mock, "--pluginList", "", "--audit-code", "off",
+                  "--stealth", "--access", "--dict",
+                  "--output", str(tmp_path / "a")])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--stealth" in out and "will NOT run" in out
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--target", mock, "--pluginList", "", "--audit-code", "off",
+                  "--dict", "--output", str(tmp_path / "b")])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--dict without --access/--user" in out
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
