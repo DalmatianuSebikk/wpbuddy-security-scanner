@@ -57,13 +57,15 @@ def scan(root, max_packages=60):
             continue
         for name, version in (payload.get("dependencies") or {}).items():
             version = _normalize(version)
-            # ranges cannot be matched against a fix boundary; inventory only
-            if version and _EXACT_VERSION_RE.match(version):
-                inventory.append((name, version, manifest.name))
+            if not version:
+                continue
+            # ranges are inventoried (they name the dependency) but never
+            # matched against a fix boundary - only pins can be
+            inventory.append((name, version, manifest.name))
 
     inventory.sort()
     for name, version, _src in inventory[:max_packages]:
-        if name.lower() in ADVISORIES and version:
+        if name.lower() in ADVISORIES and version and _EXACT_VERSION_RE.match(version):
             fixed_in, why = ADVISORIES[name.lower()]
             try:
                 below = compare_versions(version, fixed_in) < 0
