@@ -25,13 +25,8 @@ def mock():
     server.shutdown()
 
 
-@pytest.fixture(autouse=True)
-def _isolate_shared_scan_state():
-    """The soft-404 baseline cache is keyed by target; tests reuse target
-    strings with different fake servers, so start each test clean."""
-    files.reset()
-    yield
-    files.reset()
+# Per-test isolation of shared scan state lives in tests/conftest.py
+# (_isolate_scan_state: files/waf/errorpages/httpclient/config/vulndb).
 
 
 # ---------------------------------------------------------------- passive
@@ -1495,19 +1490,6 @@ def test_cli_end_to_end(mock, tmp_path, monkeypatch):
 
 # ------------------------------------------------------------- CLI target handling (P0-1)
 
-def record_sent_urls(monkeypatch):
-    """Sent-URL recorder: wrap the HTTP layer and record every requested URL."""
-    sent = []
-    real_request = httpclient.request
-
-    def recording_request(method, url, **kwargs):
-        sent.append(url)
-        return real_request(method, url, **kwargs)
-
-    monkeypatch.setattr(httpclient, "request", recording_request)
-    return sent
-
-
 def test_normalize_target_strips_query_and_fragment():
     """A query/fragment on --target must not leak into subsequent probe paths."""
     from wpbuddy import cli
@@ -1523,10 +1505,11 @@ def test_normalize_target_strips_query_and_fragment():
     assert cli._normalize_target("https:///?q=1")[0] is None                # empty hostname
 
 
-def test_cli_target_with_query_and_fragment_reaches_paths(mock, tmp_path, monkeypatch):
+def test_cli_target_with_query_and_fragment_reaches_paths(mock, tmp_path, monkeypatch,
+                                                           sent_url_recorder):
     """`--target <mock>/?utm=x#top` must reach /robots.txt, /wp-json/ and
     /xmlrpc.php on the site root, not push every path into the query string."""
-    sent = record_sent_urls(monkeypatch)
+    sent = sent_url_recorder
     monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: None)  # offline DB
     from wpbuddy import cli
 
@@ -1546,10 +1529,11 @@ def test_cli_target_with_query_and_fragment_reaches_paths(mock, tmp_path, monkey
 
 # ------------------------------------------------------------- stealth contract (P0-2)
 
-def test_cli_stealth_never_probes_target_listings(mock, tmp_path, monkeypatch):
+def test_cli_stealth_never_probes_target_listings(mock, tmp_path, monkeypatch,
+                                                   sent_url_recorder):
     """--stealth says 'passive phase only': after the passive requests, the
     code audit must not probe /wp-content/plugins/<slug>/ listings."""
-    sent = record_sent_urls(monkeypatch)
+    sent = sent_url_recorder
     monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: None)  # offline DB
     monkeypatch.setattr(gather, "gather_from_wordpress",
                         lambda *a, **k: (None, None, "not-hosted"))  # offline audit
