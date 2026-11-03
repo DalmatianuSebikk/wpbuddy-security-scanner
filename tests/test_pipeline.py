@@ -2025,6 +2025,25 @@ def test_unclassifiable_cache_is_wiped_and_regathered(mock, tmp_path, monkeypatc
     assert (cache / ".origin").read_text().strip() == "official"
 
 
+# ------------------------------------------------------------- output paths & lists (P2-1, P2-2)
+
+def test_report_write_creates_parent_dirs(tmp_path):
+    """--output nested/dir/report must work without the operator pre-creating
+    anything; same for the JSON graph."""
+    report = Report()
+    report.paragraph("hello")
+    target_file = tmp_path / "nested" / "dir" / "r.md"
+    report.write(target_file)
+    assert target_file.read_text(encoding="utf-8").startswith("#") or "hello" in \
+        target_file.read_text(encoding="utf-8")
+
+    model = confidence.ScanModel()
+    model.add_component("plugin", "x", "1.0")
+    graph_file = tmp_path / "deeper" / "tree" / "graph.json"
+    model.write_json(graph_file, "https://x/")
+    assert graph_file.is_file()
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

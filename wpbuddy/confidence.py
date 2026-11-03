@@ -23,6 +23,7 @@ scanned site (components, versions, evidence, vulnerabilities).
 """
 
 import json
+from pathlib import Path
 
 TIERS = ("CONFIRMED", "LIKELY", "UNVERIFIED", "ASSUMED")
 _TIER_MIN_SCORE = {"CONFIRMED": 80, "LIKELY": 55, "UNVERIFIED": 20}
@@ -188,5 +189,7 @@ class ScanModel:
         }
 
     def write_json(self, path, target):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)  # same contract as Report.write
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.to_dict(target), f, indent=2)

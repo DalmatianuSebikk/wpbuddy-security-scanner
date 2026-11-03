@@ -1,5 +1,7 @@
 """Thin, friendlier wrapper around markdownmaker used for scan reports."""
 
+from pathlib import Path
+
 from markdownmaker.document import Document
 from markdownmaker.markdownmaker import (
     Bold,
@@ -44,5 +46,8 @@ class Report:
         self.doc.add(HorizontalRule())
 
     def write(self, path):
+        # an --output under a not-yet-existing directory must just work
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(self.doc.write())
