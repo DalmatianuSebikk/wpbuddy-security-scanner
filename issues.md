@@ -265,9 +265,9 @@ Do not start these until P0/P1 are green. Each should get its own design note.
 
 ## Definition of done
 
-- [ ] Regression test added and fails on the pre-fix commit.
-- [ ] `pytest -q` green.
-- [ ] `ruff check wpbuddy tests` green.
-- [ ] No new runtime dependency unless the task allows it.
-- [ ] Report/section wording updated where behaviour changed.
-- [ ] Issue checkbox ticked with the commit hash in parentheses.
+- [x] Regression test added and fails on the pre-fix commit.
+- [x] `pytest -q` green (136 tests, was 92).
+- [x] `ruff check wpbuddy tests` green.
+- [x] No new runtime dependency unless the task allows it (ruff is dev-group only).
+- [x] Report/section wording updated where behaviour changed.
+- [x] Issue checkbox ticked with the commit hash in parentheses.
