@@ -76,7 +76,7 @@ def validate_usernames(report, target, candidates):
         elif any(hint in body for hint in UNKNOWN_USER_HINTS):
             pass  # account does not exist - drop quietly
     if valid:
-        report.paragraph(f"Login error messages confirm these accounts exist: "
+        report.paragraph("Login error messages confirm these accounts exist: "
                          + ", ".join(f"`{u}`" for u in valid)
                          + " (differential between 'unknown user' and 'wrong password' replies).")
     return valid

@@ -6,7 +6,7 @@ default (single, quiet requests); the access assessment (registration check,
 login-error user validation, password spray) needs --access or --user.
 """
 
-from . import access, credentials, users, xmlrpc
+from . import access, users, xmlrpc  # credentials: imported directly where used
 
 
 def run(report, target, args, dict_list=None, model=None):

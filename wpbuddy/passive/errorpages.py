@@ -59,8 +59,9 @@ def inspect(resp):
     Only responses from the scan target are collected - error pages from the
     vulnerability APIs the scanner also talks to are not the target's.
     """
-    from .. import config
     from urllib.parse import urlsplit
+
+    from .. import config
     if resp is None:
         return
     if config.TARGET_HOST:

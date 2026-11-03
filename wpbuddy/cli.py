@@ -2,10 +2,9 @@
 
 import argparse
 import sys
-from pathlib import Path
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
-from . import __version__, active, codeaudit, config, confidence, httpclient, passive
+from . import __version__, active, codeaudit, confidence, config, httpclient, passive
 from .report import Report
 
 BANNER = """

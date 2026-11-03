@@ -52,8 +52,8 @@ DEFAULT_ENUM_LIMIT = 300
 def load_lines(path):
     """Read a text file of one-entry-per-line, skipping blanks and comments."""
     try:
-        return [l.strip() for l in Path(path).read_text(encoding="utf-8").splitlines()
-                if l.strip() and not l.strip().startswith("#")]
+        return [line.strip() for line in Path(path).read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.strip().startswith("#")]
     except OSError as e:
         print(f"[!] Could not read {path}: {e}")
         return []

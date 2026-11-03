@@ -4,12 +4,11 @@ except where explicitly noted; vulnerability DB responses are stubbed)."""
 import json
 import re
 import zipfile
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-
-from mockwp_server import start_mock_wp, VALID_PASSWORD, VALID_USER
+from mockwp_server import VALID_PASSWORD, VALID_USER, start_mock_wp
 
 from wpbuddy import confidence, httpclient, stealth, versioning, vulndb
 from wpbuddy.active import access, credentials, users, xmlrpc
@@ -295,8 +294,9 @@ def test_setup_wizard_check(monkeypatch):
 def test_sensitive_files_dynamic_page_drift(monkeypatch):
     """Challenge pages that change size every request (ray ids, timestamps) still
     match the baseline: the old +/-48 byte tolerance missed the ~100-byte drift."""
-    from wpbuddy import httpclient
     import itertools
+
+    from wpbuddy import httpclient
 
     counter = itertools.count()
 
@@ -1600,6 +1600,7 @@ def test_cached_mirror_keeps_mirror_semantics(mock, tmp_path, monkeypatch):
     walked the cache root, producing .../plugins/target/wp-content/plugins/...)."""
     from types import SimpleNamespace as NS
     from urllib.parse import urlsplit
+
     from wpbuddy import codeaudit
 
     monkeypatch.chdir(tmp_path)
@@ -1620,6 +1621,7 @@ def test_cached_mirror_inferred_without_marker(mock, tmp_path, monkeypatch):
     """Marker-less legacy caches with a target/ subtree are still mirrors."""
     from types import SimpleNamespace as NS
     from urllib.parse import urlsplit
+
     from wpbuddy import codeaudit
 
     monkeypatch.chdir(tmp_path)
@@ -2002,6 +2004,7 @@ def test_unclassifiable_cache_is_wiped_and_regathered(mock, tmp_path, monkeypatc
     """A cache directory without marker and without the mirror layout is
     partial/corrupt: it is discarded (not audited) and re-gathered clean."""
     from urllib.parse import urlsplit
+
     from wpbuddy import codeaudit
     monkeypatch.chdir(tmp_path)
     cache = tmp_path / "wpbuddy-audit" / urlsplit(mock).hostname / "plugin-foo-1.0"
@@ -2099,6 +2102,7 @@ def test_dangling_dns_timeout_returns_and_continues(monkeypatch):
     """A hanging resolver must not stall the scan: the host times out as
     'resolves' (no false 'dangling' claim) and later hosts are processed."""
     import time as _time
+
     from wpbuddy.passive import dangling
     monkeypatch.setattr(dangling, "DNS_TIMEOUT", 0.3)
 
@@ -2227,6 +2231,22 @@ def test_default_dictionary_sized_and_newline_terminated():
         assert raw.endswith(b"\n"), f"{name} must end with a newline"
     # the spray list stays small and curated by design
     assert len(config.load_lines(config.DATA_DIR / "sprayPasswords.txt")) < 30
+
+
+# ------------------------------------------------------------- lint hygiene (P2-9)
+
+def test_ruff_clean_when_available():
+    """`ruff check wpbuddy tests` must stay clean (skipped when ruff, a dev
+    tool, is not installed in the running environment)."""
+    import shutil
+    import subprocess
+    ruff = shutil.which("ruff") or ".venv/bin/ruff"
+    if not (Path(ruff).exists() or shutil.which("ruff")):
+        pytest.skip("ruff not installed")
+    project = Path(__file__).resolve().parent.parent
+    result = subprocess.run([ruff, "check", "wpbuddy", "tests"],
+                            cwd=project, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout
 
 
 def test_cli_rejects_bad_target():

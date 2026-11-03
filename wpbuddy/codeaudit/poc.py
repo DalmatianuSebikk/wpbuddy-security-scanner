@@ -41,7 +41,7 @@ POST_RULES = {"request-unserialize", "backdoor-obfuscation", "csrf-no-nonce"}
 TEMPLATE_PAYLOADS = {
     "command-exec": ";echo " + MARKER,
     "ssrf-request": "https://your-collaborator.example.net/wpbuddy",
-    "request-unserialize": 'a:1:{s:4:"test";s:%d:"%s";}' % (len(MARKER), MARKER),
+    "request-unserialize": f'a:1:{{s:4:"test";s:{len(MARKER)}:"{MARKER}";}}',
     "backdoor-obfuscation": MARKER,
     "eval-usage": MARKER,
     "file-inclusion": "../../../../etc/hostname",

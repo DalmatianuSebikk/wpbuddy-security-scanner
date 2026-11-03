@@ -144,8 +144,8 @@ def inspect_response(resp):
     """
     global _inspect_warned
     try:
-        from .passive import errorpages  # deferred: avoids import cycles at load time
         from . import waf
+        from .passive import errorpages  # deferred: avoids import cycles at load time
         errorpages.inspect(resp)
         waf.inspect_response(resp)
     except Exception as e:

@@ -158,7 +158,12 @@ def multicall_credentials(target, pairs, chunk_size=50):
 
 
 def bruteforce(report, target, user, passwords):
-    """Dictionary attack for one user via system.multicall. Returns the password or None."""
+    """Dictionary attack for one user via system.multicall. Returns the password or None.
+
+    # NOTE: not called by the default scan (access.password_spray builds its
+    own multicall rounds); kept as the tested public single-user entry point
+    for --via-xmlrpc consumers and the test suite (P2-9 decision).
+    """
     for password in (multicall_credentials(target, [(user, p) for p in passwords]) or {}).values():
         return password
     return None

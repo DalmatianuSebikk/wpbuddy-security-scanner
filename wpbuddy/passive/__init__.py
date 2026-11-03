@@ -18,7 +18,7 @@ each finding, and the same facts populate the per-scan model (the knowledge
 graph exported with --json).
 """
 
-from .. import config, confidence, vulndb
+from .. import confidence, config, vulndb
 from . import content, core_version, dangling, files, fingerprints, readme, wprest
 
 
@@ -301,7 +301,7 @@ def _scan_rest(report, target, namespaces):
 
 
 def _format_vuln(v, tier_label=None):
-    from ..report import escape_md, _md_url
+    from ..report import _md_url, escape_md
     text = f"**{escape_md(v['name'])}**"
     if tier_label:
         text += f" {tier_label}"
