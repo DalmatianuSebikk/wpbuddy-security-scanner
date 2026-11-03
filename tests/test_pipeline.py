@@ -2,6 +2,7 @@
 except where explicitly noted; vulnerability DB responses are stubbed)."""
 
 import json
+import re
 import zipfile
 from pathlib import Path
 
@@ -1512,6 +1513,43 @@ def test_cli_target_with_query_and_fragment_reaches_paths(mock, tmp_path, monkey
     assert f"{mock}wp-json/" in sent
     assert f"{mock}xmlrpc.php" in sent
     assert all("utm" not in u and "#" not in u for u in sent), "query/fragment leaked into probes"
+
+
+# ------------------------------------------------------------- stealth contract (P0-2)
+
+def test_cli_stealth_never_probes_target_listings(mock, tmp_path, monkeypatch):
+    """--stealth says 'passive phase only': after the passive requests, the
+    code audit must not probe /wp-content/plugins/<slug>/ listings."""
+    sent = record_sent_urls(monkeypatch)
+    monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: None)  # offline DB
+    monkeypatch.setattr(gather, "gather_from_wordpress",
+                        lambda *a, **k: (None, None, "not-hosted"))  # offline audit
+    from wpbuddy import cli
+
+    output = tmp_path / "report"
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--target", mock, "--pluginList", "", "--stealth",
+                  "--output", str(output)])
+    assert exc.value.code == 0
+
+    listings = [u for u in sent if re.search(r"wp-content/(plugins|themes)/[^/]+/$", u)]
+    assert listings == [], f"stealth scan probed target listings: {listings}"
+
+
+def test_cli_stealth_with_explicit_audit_target_warns(mock, tmp_path, monkeypatch, capsys):
+    """An explicit --audit-code target|auto with --stealth gets a warning that
+    target requests will still happen."""
+    monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: None)
+    from wpbuddy import cli
+
+    output = tmp_path / "report"
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--target", mock, "--pluginList", "", "--stealth",
+                  "--audit-code", "target", "--output", str(output)])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--audit-code target" in out
+    assert "target requests" in out.lower() or "reach" in out.lower()
 
 
 def test_cli_rejects_bad_target():

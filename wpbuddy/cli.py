@@ -107,10 +107,10 @@ Examples:
                         help="Attempt to reproduce code-audit findings on the target with benign "
                              "payloads (reflected-XSS markers, harmless LFI files, error-based SQL); "
                              "dangerous rules only get manual curl templates")
-    parser.add_argument("--audit-code", choices=("auto", "target", "source", "off"), default="auto",
+    parser.add_argument("--audit-code", choices=("auto", "target", "source", "off"), default=None,
                         help="Gather component code and analyze it locally: auto (listing, then "
                              "wordpress.org), target (only exposed listings), source (only "
-                             "wordpress.org, never touches the target), off (default: %(default)s)")
+                             "wordpress.org, never touches the target), off (default: auto)")
     parser.add_argument("--source-dir", metavar="DIR",
                         help="Directory of operator-provided component archives for code the "
                              "audit cannot download (commercial plugins, custom themes): "
@@ -142,6 +142,16 @@ def _normalize_target(raw):
     return target, None
 
 
+def explicitly_passed(argv, flag):
+    """True when the operator wrote `flag` on the command line.
+
+    argparse's default is indistinguishable from an explicit value that
+    matches it, and behaviour differences (like P0-2's stealth downgrade)
+    hinge on the operator's intent, not the value.
+    """
+    return any(arg == flag or arg.startswith(flag + "=") for arg in (argv if argv is not None else sys.argv[1:]))
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -151,6 +161,21 @@ def main(argv=None):
         print(error)
         sys.exit(1)
     config.TARGET_HOST = (urlparse(target).hostname or "").lower()
+
+    # --stealth promises "passive phase only", but the default --audit-code
+    # mode ('auto') probes directory listings ON the target. Without an
+    # explicit operator choice, downgrade the audit to wordpress.org sources
+    # (which never touch the target); with one, warn about the contradiction.
+    args.audit_code = args.audit_code or "auto"
+    if args.stealth and not explicitly_passed(argv, "--audit-code"):
+        if args.audit_code in ("auto", "target"):
+            args.audit_code = "source"
+            print("[*] Stealth: code audit limited to official wordpress.org sources "
+                  "(no requests to the target)")
+    elif args.stealth and args.audit_code in ("auto", "target"):
+        print(f"[!] Warning: --stealth with --audit-code {args.audit_code} still probes "
+              f"directory listings on the target - requests WILL reach it")
+
 
     # Apply global HTTP settings chosen on the CLI.
     config.DEFAULT_TIMEOUT = args.timeout
