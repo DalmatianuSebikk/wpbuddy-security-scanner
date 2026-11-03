@@ -227,6 +227,36 @@ def _run_db_command(argv):
           + (f", {fail} failed" if fail else ""))
 
 
+def _write_priorities(report, model):
+    """The Remediation priorities section (F-2): what to fix first."""
+    creds = model.credentials()
+    risks = model.risks()
+    if not creds and not risks:
+        return
+    report.section("Remediation priorities")
+    report.paragraph(
+        "Ranked by risk = CVSS x exposure (unauthenticated > authenticated) x "
+        "confidence in the finding. Work top-down; 'patch available' means a "
+        "fixed release exists upstream, so updating clears the row.")
+    if creds:
+        report.paragraph(f"**Working credentials found for {len(creds)} account(s)** - "
+                         "change these passwords (and revoke active sessions) before "
+                         "anything else: " + ", ".join(f"`{c['user']}`" for c in creds))
+    top = risks[:10]
+    if top:
+        report.bullets([
+            f"**{r['risk']}** - {r['component']}: {r['name']}"
+            + (f" (CVSS {r['severity']})" if r.get("severity") else "")
+            + f" - {r['exposure']}"
+            + (f", confidence {r['confidence']}/100" if r.get("confidence") is not None else "")
+            + (", **patch available - update**" if r["patch_available"] else "")
+            for r in top
+        ])
+    if len(risks) > len(top):
+        report.paragraph(f"...and {len(risks) - len(top)} lower-risk findings in the "
+                         "sections above.")
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "db":
@@ -346,6 +376,10 @@ def main(argv=None):
                                     known_plugins=set(passive_results.get("plugins", {})))
         except Exception as e:
             print(f"[*] Post-scan analysis skipped: {e}")
+        try:
+            _write_priorities(report, model)
+        except Exception as e:
+            print(f"[*] Risk summary skipped: {e}")
         report.write(f"{output}.md")
         print(f"[*] Report saved: {output}.md")
         if args.json:

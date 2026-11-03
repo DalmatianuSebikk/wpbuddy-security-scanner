@@ -25,6 +25,8 @@ scanned site (components, versions, evidence, vulnerabilities).
 import json
 from pathlib import Path
 
+from . import risk
+
 TIERS = ("CONFIRMED", "LIKELY", "UNVERIFIED", "ASSUMED")
 _TIER_MIN_SCORE = {"CONFIRMED": 80, "LIKELY": 55, "UNVERIFIED": 20}
 
@@ -163,10 +165,12 @@ class ScanModel:
         """A vulnerability node plus an affected-by edge from the component."""
         count = sum(1 for n in self._nodes.values() if n["type"] == "vulnerability")
         node_id = f"vuln:{component_id}:{count}"
+        exposure_label, _ = risk.exposure(vuln.get("description") or vuln.get("name") or "")
         self._nodes[node_id] = {
             "id": node_id, "type": "vulnerability", "label": vuln.get("name", "Unnamed"),
             "severity": vuln.get("severity"), "link": vuln.get("link"),
             "applicability": vuln.get("basis"),
+            "exposure": exposure_label,
         }
         if conf is not None:
             conf = dict(conf)
@@ -195,6 +199,33 @@ class ScanModel:
         self._edges.append({"from": "site", "to": node_id,
                             "relation": "compromised-by"})
         return node_id
+
+    def risks(self):
+        """All vulnerability findings decorated with a risk score, sorted
+        descending (F-2) - the data behind the Remediation priorities section."""
+        out = []
+        for edge in self._edges:
+            if edge["relation"] != "affected-by":
+                continue
+            node = self._nodes.get(edge["to"])
+            if not node or node["type"] != "vulnerability":
+                continue
+            conf = (node.get("confidence") or {}).get("score")
+            out.append({
+                "component": edge["from"],
+                "name": node.get("label"),
+                "severity": node.get("severity"),
+                "link": node.get("link"),
+                "exposure": node.get("exposure", "unknown"),
+                "confidence": conf,
+                "patch_available": risk.patch_available(node.get("applicability")),
+                "risk": risk.risk_score(node.get("severity"),
+                                        node.get("exposure", "unknown"), conf),
+            })
+        return sorted(out, key=lambda item: item["risk"], reverse=True)
+
+    def credentials(self):
+        return [n for n in self._nodes.values() if n["type"] == "credential"]
 
     def components(self):
         return [n for n in self._nodes.values() if n["type"] != "vulnerability"]

@@ -2355,6 +2355,72 @@ def test_cli_db_status_and_update(tmp_path, monkeypatch, capsys):
     assert "Refreshed 3" in capsys.readouterr().out
 
 
+# ------------------------------------------------------------- risk scoring (F-2)
+
+def test_risk_scoring_formula_and_ordering():
+    from wpbuddy import risk
+    assert risk.parse_cvss("7.5 (high)") == 7.5
+    assert risk.parse_cvss("9.8 (critical)") == 9.8
+    assert risk.parse_cvss(None) is None
+    assert risk.parse_cvss("garbage") is None
+
+    assert risk.exposure("Unauthenticated stored XSS")[0] == "unauthenticated"
+    assert risk.exposure("requires an authenticated subscriber")[0] == "authenticated"
+    assert risk.exposure("nothing said about access")[0] == "unknown"
+
+    # unauth high-CVSS confident finding outranks auth same-CVSS
+    unauth = risk.risk_score("9.8 (critical)", "unauthenticated", 90)
+    auth = risk.risk_score("9.8 (critical)", "authenticated", 90)
+    assert unauth > auth
+    # low confidence sinks the score but never below the 0.3 floor
+    assert risk.risk_score("9.8 (critical)", "unauthenticated", 5) > 0
+    assert risk.risk_score("9.8 (critical)", "unauthenticated", 5) < unauth
+
+    model = confidence.ScanModel()
+    model.add_component("plugin", "a", "1.0")
+    model.add_component("plugin", "b", "1.0")
+    model.add_vulnerability("plugin:a", {
+        "name": "CVE-1", "severity": "9.8 (critical)",
+        "description": "unauthenticated RCE", "basis": "bounded"},
+        conf={"score": 90})
+    model.add_vulnerability("plugin:b", {
+        "name": "CVE-2", "severity": "5.3 (medium)",
+        "description": "authenticated XSS", "basis": "assumed"},
+        conf={"score": 40})
+    risks = model.risks()
+    assert risks[0]["name"] == "CVE-1"
+    assert risks[0]["patch_available"] is True
+    assert risks[0]["risk"] > risks[1]["risk"]
+    assert risks[1]["exposure"] == "authenticated"
+
+
+def test_cli_report_has_remediation_priorities(mock, tmp_path, monkeypatch):
+    """The end-of-report section ranks findings by risk (credentials first)."""
+    def fake_fetch(kind, slug):
+        if kind == "core":
+            return {"vulnerability": [
+                {"operator": {"max_version": "99.0", "max_operator": "lt"},
+                 "impact": {"cvss3": {"score": "9.8", "severity": "critical"}},
+                 "source": [{"name": "CVE-2020-22222",
+                             "description": "unauthenticated stuff"}]}]}
+        return None
+
+    monkeypatch.setattr(vulndb, "_fetch", fake_fetch)
+    monkeypatch.setattr(gather, "gather_from_wordpress", lambda *a, **k: None)
+    monkeypatch.chdir(tmp_path)
+    from wpbuddy import cli
+
+    output = tmp_path / "prio"
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--target", mock, "--pluginList", "", "--audit-code", "off",
+                  "--output", str(output)])
+    assert exc.value.code == 0
+    text = output.with_suffix(".md").read_text(encoding="utf-8")
+    assert "Remediation priorities" in text
+    assert "CVE-2020-22222" in text
+    assert "patch available" in text
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
