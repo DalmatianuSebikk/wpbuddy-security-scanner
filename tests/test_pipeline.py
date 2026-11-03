@@ -1921,6 +1921,19 @@ def test_directory_listing_reported_as_finding(mock, tmp_path, monkeypatch):
     assert "Options -Indexes" in text
 
 
+# ------------------------------------------------------------- theme crawl parity (P1-8)
+
+def test_theme_discovered_on_inner_page(mock, monkeypatch):
+    """A theme referenced only on a crawled inner page (not the homepage) is
+    discovered - themes used to be scraped from the homepage alone."""
+    from wpbuddy import passive
+    monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: None)
+    args = SimpleNamespace(pluginList="", enum_plugins=False, max_pages=5)
+
+    results = passive.run(Report(), mock, args)
+    assert "innertheme" in results["themes"]
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

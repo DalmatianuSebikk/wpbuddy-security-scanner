@@ -35,7 +35,7 @@ def run(report, target, args, model=None):
 
     _scan_core(report, target, model)
     results["plugins"] = _scan_plugins(report, target, args, namespaces, model, pages, refs, artifacts)
-    results["themes"] = _scan_themes(report, target, model)
+    results["themes"] = _scan_themes(report, target, model, refs)
     _scan_rest(report, target, namespaces)
     files.check_robots(report, target)
     files.check_security_txt(report, target)
@@ -229,10 +229,18 @@ def _scan_plugins(report, target, args, namespaces, model, pages, refs, artifact
     return versions
 
 
-def _scan_themes(report, target, model):
+def _scan_themes(report, target, model, refs=None):
+    """Theme discovery over the SAME crawled pages the plugin scan used.
+
+    Themes used to be scraped from the homepage alone (a second fetch!) -
+    a child theme referenced only on an inner page was invisible (P1-8).
+    `refs` is the refs dict from run()'s crawl; standalone callers without
+    one get the old homepage-only behaviour.
+    """
     report.section("Theme")
-    pages = [target]  # theme refs are on the homepage; avoid re-crawling here
-    refs, _ = content.discover_refs(pages, target)
+    if refs is None:
+        pages = [target]
+        refs, _ = content.discover_refs(pages, target)
     themes = sorted(refs["themes"])
     if not themes:
         print("[!] No theme identified")
