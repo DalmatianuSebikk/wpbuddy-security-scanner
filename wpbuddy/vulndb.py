@@ -242,6 +242,12 @@ def affected_vulnerabilities(installed_version, vulns, slug=None):
 
             if bounds and all(excluded(bound, op) for bound, op in bounds):
                 basis = "contradicted"
+            elif bounds and basis == "assumed":
+                # the advisory's own range INCLUDES the installed version -
+                # that is a real bound, not an assumption (P1-1). 'unfixed'
+                # findings keep their (slightly lower) flag: the advisory
+                # explicitly claims all versions are affected.
+                basis = "bounded"
         # The same issue often arrives from several sources (CVE + WPScan +
         # Wordfence); dedupe on the description text, like the core scan intended.
         key = description or name

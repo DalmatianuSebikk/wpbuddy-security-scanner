@@ -1756,6 +1756,25 @@ def test_waf_and_errorpages_accept_same_site_hosts(monkeypatch):
     errorpages.reset()
 
 
+def test_advisory_bounds_promote_assumed_to_bounded():
+    """An 'assumed' finding whose advisory bounds DO include the installed
+    version becomes 'bounded' - dozens of clearly-range-matched findings
+    used to render as [ASSUMED] (P1-1). Only 'assumed' is promoted;
+    'unfixed' advisories keep their explicit claim."""
+    inside = [{"operator": {},
+               "source": [{"name": "WordPress <= 6.9.1 - stored XSS", "description": "xss"}]}]
+    assert vulndb.affected_vulnerabilities("6.6.8", inside)[0]["basis"] == "bounded"
+
+    below = [{"operator": {},
+              "source": [{"name": "WordPress <= 6.5.0 - stored XSS", "description": "xss"}]}]
+    assert vulndb.affected_vulnerabilities("6.6.8", below)[0]["basis"] == "contradicted"
+
+    multi = [{"operator": {},
+              "source": [{"name": "Affects 6.0 through 6.2 and 6.6 through 6.9.1",
+                          "description": "d"}]}]
+    assert vulndb.affected_vulnerabilities("6.6.8", multi)[0]["basis"] == "bounded"
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
