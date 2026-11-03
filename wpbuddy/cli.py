@@ -3,7 +3,7 @@
 import argparse
 import sys
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from . import __version__, active, codeaudit, config, confidence, httpclient, passive
 from .report import Report
@@ -119,16 +119,37 @@ Examples:
     return parser
 
 
+def _normalize_target(raw):
+    """Canonicalize an operator-supplied target URL.
+
+    Query strings and fragments must never survive into the target: every
+    later probe is built as `target + path`, so a `?utm=...` left in place
+    would push every path into the query string
+    (`https://x/?utm=1robots.txt`). Returns (normalized_url, None) on
+    success or (None, error_message) when the target is unusable.
+    """
+    target = (raw or "").strip()
+    if not target.startswith(("http://", "https://")):
+        return None, "Target must start with http:// or https://"
+    parts = urlsplit(target)
+    if not parts.hostname:
+        return None, "Target has no hostname"
+    # force the root path when empty so a query-only target cannot become
+    # 'https://x//' after the trailing slash is appended below
+    target = urlunsplit((parts.scheme, parts.netloc, parts.path or "/", "", ""))
+    if not target.endswith("/"):
+        target += "/"
+    return target, None
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    target = args.target.strip()
-    if not target.startswith(("http://", "https://")):
-        print("Target must start with http:// or https://")
+    target, error = _normalize_target(args.target)
+    if error:
+        print(error)
         sys.exit(1)
-    if not target.endswith("/"):
-        target += "/"
     config.TARGET_HOST = (urlparse(target).hostname or "").lower()
 
     # Apply global HTTP settings chosen on the CLI.

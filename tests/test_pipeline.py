@@ -1463,6 +1463,57 @@ def test_cli_end_to_end(mock, tmp_path, monkeypatch):
                for _, to, rel in relations if rel == "affected-by")
 
 
+# ------------------------------------------------------------- CLI target handling (P0-1)
+
+def record_sent_urls(monkeypatch):
+    """Sent-URL recorder: wrap the HTTP layer and record every requested URL."""
+    sent = []
+    real_request = httpclient.request
+
+    def recording_request(method, url, **kwargs):
+        sent.append(url)
+        return real_request(method, url, **kwargs)
+
+    monkeypatch.setattr(httpclient, "request", recording_request)
+    return sent
+
+
+def test_normalize_target_strips_query_and_fragment():
+    """A query/fragment on --target must not leak into subsequent probe paths."""
+    from wpbuddy import cli
+    url, error = cli._normalize_target("https://example.com/?utm=x#top")
+    assert error is None
+    assert url == "https://example.com/"
+    assert cli._normalize_target("https://x/?utm=1")[0] == "https://x/"      # no double slash
+    assert cli._normalize_target("https://x/blog")[0] == "https://x/blog/"  # path is kept
+    assert cli._normalize_target("https://x/blog/?utm=1")[0] == "https://x/blog/"
+    assert cli._normalize_target("  https://x/  ")[0] == "https://x/"       # stripped
+    assert cli._normalize_target("example.com")[0] is None                  # no scheme
+    assert cli._normalize_target("ftp://x/")[0] is None
+    assert cli._normalize_target("https:///?q=1")[0] is None                # empty hostname
+
+
+def test_cli_target_with_query_and_fragment_reaches_paths(mock, tmp_path, monkeypatch):
+    """`--target <mock>/?utm=x#top` must reach /robots.txt, /wp-json/ and
+    /xmlrpc.php on the site root, not push every path into the query string."""
+    sent = record_sent_urls(monkeypatch)
+    monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: None)  # offline DB
+    from wpbuddy import cli
+
+    output = tmp_path / "report"
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--target", mock + "?utm=x&utm2=y#top",
+                  "--pluginList", "",
+                  "--audit-code", "off",
+                  "--output", str(output)])
+    assert exc.value.code == 0
+
+    assert f"{mock}robots.txt" in sent
+    assert f"{mock}wp-json/" in sent
+    assert f"{mock}xmlrpc.php" in sent
+    assert all("utm" not in u and "#" not in u for u in sent), "query/fragment leaked into probes"
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
