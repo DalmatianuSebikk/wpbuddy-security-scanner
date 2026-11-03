@@ -1812,6 +1812,32 @@ def test_enum_counts_real_readme_200(monkeypatch):
     assert installed == ["akismet"]
 
 
+# ------------------------------------------------------------- junk-detection precision (P1-3)
+
+def test_response_is_junk_keeps_real_readmes(monkeypatch):
+    """A real readme whose changelog mentions 'Link not found fixed' is NOT
+    junk; challenge pages and 404 articles are."""
+    # honest 404s for the baseline probes -> no soft-404 baseline
+    monkeypatch.setattr(httpclient, "get",
+                        lambda url, **kw: FakeResp(404, "<html>404</html>"))
+    target = "https://plain.example.com/"
+
+    readme = ("=== Cool Plugin ===\nStable tag: 2.1\nRequires at least: 6.0\n"
+              "== Changelog ==\n= 2.1 =\n* Link not found fixed\n* Bugfix\n"
+              + "= 2.0 =\n* Initial public release, documentation overhaul\n" * 40)
+    assert len(readme) > files.ERROR_SHAPE_MAX_BYTES
+    assert not files.response_is_junk(FakeResp(200, readme), target)
+
+    challenge = FakeResp(200, "<html><head><title>One moment, please...</title>"
+                              "</head><body>Checking your browser</body></html>")
+    assert files.response_is_junk(challenge, target)
+
+    article = FakeResp(200, "<html><head><title>Error 404 - nothing here"
+                            "</title></head><body>The page you requested "
+                            "has been moved.</body></html>")
+    assert files.response_is_junk(article, target)
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

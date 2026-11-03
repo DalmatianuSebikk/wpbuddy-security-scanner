@@ -106,6 +106,13 @@ NOT_FOUND_MARKERS = re.compile(
 # their titles; scanning more just wastes time on big pages)
 MARKER_SCAN_BYTES = 4000
 
+# Error/challenge pages announce themselves by shape: HTML document structure
+# up front, a tiny body, or a non-2xx status. Only error-shaped bodies get
+# the marker scan - a real readme/changelog is plain text that can legitimately
+# mention "link not found fixed" without being an error page (P1-3).
+ERROR_PAGE_SHAPE_RE = re.compile(r"<\s*(?:!doctype\s+html|html|head|title)\b", re.I)
+ERROR_SHAPE_MAX_BYTES = 1500
+
 
 def check_headers(report, target):
     report.section("HTTP security headers")
@@ -284,19 +291,37 @@ def soft404_baseline(target):
     return _baselines[target]
 
 
+def _looks_like_error_page(resp):
+    """Cheap shape test: is this body plausibly an error/challenge page?
+
+    HTML structure near the top, a very short body, or an error status all
+    qualify. Plain-text bodies of real content (readmes, changelogs) do not,
+    which is exactly what keeps their incidental marker words harmless.
+    """
+    if resp.status_code >= 400:
+        return True
+    body = resp.text or ""
+    return (len(body) <= ERROR_SHAPE_MAX_BYTES
+            or bool(ERROR_PAGE_SHAPE_RE.search(body[:MARKER_SCAN_BYTES])))
+
+
 def response_is_junk(resp, target):
     """True when a 200 response is actually a not-found/challenge page.
 
-    Other modules call this before trusting a fetched body: it either matches
-    the shared soft-404 baseline or carries error/challenge markers. Only a
-    body that passes is content the server produced for THIS url.
+    The site's soft-404 baseline is the primary signal and always applies.
+    The error-marker scan only runs on error-shaped bodies (see
+    _looks_like_error_page) so real readmes survive; WAF interstitials are
+    HTML pages and never escape either check.
     """
     if resp is None:
         return True
-    if NOT_FOUND_MARKERS.search((resp.text or "")[:MARKER_SCAN_BYTES]):
-        return True
     baseline = soft404_baseline(target)
-    return bool(baseline) and _matches_baseline(resp, baseline)
+    if baseline and _matches_baseline(resp, baseline):
+        return True
+    if _looks_like_error_page(resp) and \
+            NOT_FOUND_MARKERS.search((resp.text or "")[:MARKER_SCAN_BYTES]):
+        return True
+    return False
 
 
 def reset():
