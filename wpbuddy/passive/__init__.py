@@ -19,7 +19,7 @@ graph exported with --json).
 """
 
 from .. import confidence, config, vulndb
-from . import assets, content, core_version, dangling, files, fingerprints, readme, wprest
+from . import assets, content, core_version, dangling, files, fingerprints, posture, readme, wprest
 
 
 def run(report, target, args, model=None):
@@ -49,6 +49,7 @@ def run(report, target, args, model=None):
     files.check_setup_wizard(report, target)
     files.check_headers(report, target)
     dangling.check(report, target, artifacts.get("pages_html", ""))
+    posture.check(report, target)
     if config.AUTH_COOKIE or config.AUTH_BASIC:
         from . import authcheck  # deferred: only imported when creds exist
         authcheck.check(report, target)

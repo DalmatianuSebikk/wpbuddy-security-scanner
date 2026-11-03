@@ -2666,6 +2666,65 @@ def test_malware_findings_reach_component_report(mock, tmp_path, monkeypatch):
     assert "malware-known-webshell" in report.doc.write()
 
 
+# ------------------------------------------------------------- TLS/email posture (F-8)
+
+def test_posture_parsers():
+    from wpbuddy.passive import posture
+    spf, weak = posture._parse_spf(["v=spf1 a mx -all", "google-site-verification=x"])
+    assert spf == "v=spf1 a mx -all" and weak is False
+    assert posture._parse_spf(["v=spf1 +all"])[1] is True          # permissive
+    assert posture._parse_spf(["v=spf1 a mx"])[1] is True          # unterminated
+    assert posture._parse_spf(["nothing here"]) == (None, False)
+
+    assert posture._parse_dmarc(["v=DMARC1; p=none; rua=mailto:x@y"]) == "none"
+    assert posture._parse_dmarc(["v=DMARC1; p=reject"]) == "reject"
+    assert posture._parse_dmarc(["v=spf1 -all"]) is None
+
+    # cert expiry math
+    from datetime import datetime, timedelta, timezone
+    soon = (datetime.now(timezone.utc) + timedelta(days=10)).strftime("%b %d %H:%M:%S %Y GMT")
+    assert 9 <= posture._days_left(soon) <= 11
+    assert posture._days_left("not a date") is None
+
+
+def test_posture_report_rendering(monkeypatch):
+    """The section renders cert expiry, weak DMARC and missing-SPF findings
+    from stubbed lookups; a dead TLS handshake never crashes it."""
+    from datetime import datetime, timedelta, timezone
+
+    from wpbuddy.passive import posture
+
+    expiring = (datetime.now(timezone.utc) + timedelta(days=7)).strftime("%b %d %H:%M:%S %Y GMT")
+    expected_days = posture._days_left(expiring)
+    monkeypatch.setattr(posture, "_tls_facts",
+                        lambda host, timeout=5: {"protocol": "TLSv1.1",
+                                                 "days_left": expected_days,
+                                                 "issuer": "Let's Encrypt"})
+    monkeypatch.setattr(posture, "_txt_records",
+                        lambda name, rtype="TXT": [] if name.startswith("_dmarc") else ["v=spf1 +all"])
+
+    report = Report()
+    posture.check(report, "https://www.example.com/")
+    text = report.doc.write()
+    assert "TLS / DNS / email posture" in text
+    assert "TLSv1.1" in text and "Weak protocol" in text
+    assert f"expires in {expected_days} days" in text
+    assert "Weak SPF" in text
+    assert "No DMARC record" in text
+
+    # TLS handshake refused -> honest 'could not' line, no crash
+    monkeypatch.setattr(posture, "_tls_facts", lambda host, timeout=5: None)
+    report = Report()
+    posture.check(report, "https://down.example.com/")
+    assert "Could not establish TLS" in report.doc.write()
+
+    # no resolver tool available -> email part skipped explicitly
+    monkeypatch.setattr(posture.shutil, "which", lambda name: None)
+    report = Report()
+    posture.check(report, "https://www.example.com/")
+    assert "Email posture skipped" in report.doc.write()
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
