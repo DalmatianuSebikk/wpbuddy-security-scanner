@@ -242,24 +242,24 @@ pytest -q
 
 ---
 
-## Feature backlog (separate from bugs)
+## Feature backlog
 
-Do not start these until P0/P1 are green. Each should get its own design note.
+Each feature ships with its own design note under `docs/design/`.
 
-- **F-1 Local vulnerability DB + `--offline`**: SQLite import of WPScan/Patchstack/Wordfence feeds, `wpbuddy db update`, schema version, TTL. Removes the single-API dependency and makes evaluation reproducible.
-- **F-2 Risk scoring**: CVSS × exposure (unauth/auth) × confidence × patch availability; sort findings by risk; remediation priority section.
-- **F-3 Authenticated mode**: `--cookie`, `--app-password`; auth matrix (route → required capability); reach admin-ajax/REST.
-- **F-4 Core integrity + modified-file detection**: official checksums API; optional wordpress.org SVN comparison for plugins.
-- **F-5 Version detection from static assets**: `?ver=` on plugin CSS/JS, hashed asset names, without readme dependency.
-- **F-6 Bundled-dependency SCA**: parse `composer.lock`/`package.json`; map to vulnerable library versions.
-- **F-7 Malware/webshell + secret scan** of mirrored files (entropy, eval chains, key patterns).
-- **F-8 DNS/email/TLS posture** (SPF, DMARC, DKIM, cert expiry/protocol, CAA) and verified subdomain-takeover fingerprints.
-- **F-9 More active checks**: pingback SSRF callback, `wp-cron.php`, REST CORS, cookie flags, public `admin-ajax` actions, `install.php`/`upgrade.php`, more `wp-config` variants.
-- **F-10 Reporting**: HTML/PDF, executive summary, scan metadata, `--diff` against a previous JSON graph, SARIF, `--fail-on`, suppression/allowlist file.
-- **F-11 PoC verifier hardening**: per-rule confirmation signals, multi-parameter payloads, request/time budget.
-- **F-12 PHP tokenizer/AST taint analysis or optional Semgrep rules.**
-- **F-13 Bulk inventory/resume/schedule + read-only web UI/TUI.**
-- **F-14 i18n (EN/RO).**
+- [x] **F-1 Local vulnerability DB + `--offline`** (9db1f5d): SQLite response cache (schema v1, 7-day TTL), stale-fallback on API failure, `--offline`, `wpbuddy db status|update`. Feed import (WPScan/Patchstack/Wordfence) deferred — see note.
+- [x] **F-2 Risk scoring** (d6b579d): CVSS x exposure x confidence with patch-availability flags; `ScanModel.risks()`; "Remediation priorities" section.
+- [x] **F-3 Authenticated mode** (b389c84): `--cookie`, `--app-password` (target-host-only), users/me identity + capability + wp-admin reach mapping.
+- [x] **F-4 Core integrity + modified-file detection** (9850874): deployed-mirror vs official-archive diff (modified/added files, clean confirmation). Core checksums blocked on core mirroring — see note.
+- [x] **F-5 Version detection from static assets** (587e0d9): `?ver=` harvesting, same-site filtered, majority vote, `asset-ver` confidence weight.
+- [x] **F-6 Bundled-dependency SCA** (a3bfff0): composer.lock/package.json inventory + curated advisory table. OSV feed deferred.
+- [x] **F-7 Malware/webshell + secret scan** (29e2154): webshell markers, decode chains, PEM/cloud/WP-salt secrets in every gathered tree.
+- [x] **F-8 DNS/email/TLS posture** (fca9492): TLS protocol/expiry, SPF/DMARC/CAA best-effort via dig/nslookup. DKIM + takeover fingerprints deferred.
+- [x] **F-9 More active checks** (afa27e5): wp-cron, install/upgrade remainder, REST CORS reflection, cookie flags, admin-ajax heartbeat, pingback callout, wp-config variants.
+- [x] **F-10 Reporting** (583bde5): executive summary + metadata, `--diff`, `--fail-on`, `--suppressions`. HTML/PDF/SARIF deferred.
+- [x] **F-11 PoC verifier hardening** (711ec80): multi-parameter payloads, unescaped-payload XSS confirmation, /etc/passwd-first LFI evidence, wall-clock budget.
+- [x] **F-12 Semgrep rules** (7b0c2a9): bundled rule pack + `--semgrep` (optional binary); AST taint engine deferred — see note.
+- [ ] **F-13 Bulk inventory/resume/schedule + UI** — design note only (`docs/design/F-13-bulk-resume-ui.md`); blocked on the engagement model.
+- [ ] **F-14 i18n (EN/RO)** — design note only (`docs/design/F-14-i18n.md`); deferred until the CLI subcommand split.
 
 ---
 
