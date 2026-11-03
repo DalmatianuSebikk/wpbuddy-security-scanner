@@ -2044,6 +2044,16 @@ def test_report_write_creates_parent_dirs(tmp_path):
     assert graph_file.is_file()
 
 
+def test_report_numbered_list_renders_sequence():
+    """report.numbered must produce 1. 2. 3. - one list, not N one-item lists."""
+    report = Report()
+    report.numbered(["first", "second", "third"])
+    text = report.doc.write()
+    assert "1. first" in text
+    assert "2. second" in text
+    assert "3. third" in text
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

@@ -36,8 +36,10 @@ class Report:
             self.doc.add(UnorderedList(tuple(items)))
 
     def numbered(self, items):
-        for item in items:
-            self.doc.add(OrderedList((item,)))
+        """One ordered list for the whole iterable - adding an OrderedList
+        per item rendered every entry as '1.'."""
+        if items:
+            self.doc.add(OrderedList(tuple(items)))
 
     def code(self, text):
         self.doc.add(CodeBlock(text))
