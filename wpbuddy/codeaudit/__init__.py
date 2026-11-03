@@ -92,17 +92,20 @@ def run(report, target, passive_results, args):
                 if f.get("poc") and f["poc"].get("poc", {}).get("params")
             ]
 
-    if not audited:
-        report.paragraph("No component code could be gathered (no listings exposed and no "
-                         "versions detected). Passive + database findings still apply.")
-        return {}
-
+    # Unaudited components are reported even when NOTHING could be gathered:
+    # silently dropping them (the old early return) hid both the component
+    # and the reason it was skipped (P1-6).
     if unaudited:
         report.paragraph("Components the audit could NOT gather, and why:")
         report.bullets([f"**{label}** - {_reason_text(reason)}"
                         for label, reason in unaudited])
         report.paragraph("Provide a licensed copy as `<kind>-<slug>-<version>.zip` via "
                          "`--source-dir DIR` to audit anything in the first two buckets.")
+
+    if not audited:
+        report.paragraph("No component code could be gathered (no listings exposed and no "
+                         "versions detected). Passive + database findings still apply.")
+        return {}
 
     report.paragraph(f"Gathered sources and raw findings are kept under `{workdir.resolve()}` "
                      f"for manual review.")
@@ -169,6 +172,18 @@ def _gather(mode, kind, slug, version, target, path, source_dir=None):
         if source:
             print(f"[!] Mirrored {kind} '{slug}' source via directory listing (this is a finding!)")
             return source, "**mirrored from the target's exposed directory listing**", None
+        if mode == "target":
+            # Listing-only mode failed. An operator-provided archive is still
+            # legitimate (it never touches the target), but wordpress.org
+            # stays off-limits by the target-mode contract (P1-6).
+            if source_dir:
+                source, origin, _ = gather.gather_from_wordpress(
+                    kind, slug, version, path / "official",
+                    source_dir=source_dir, operator_only=True)
+                if source:
+                    print(f"[*] Gathered {kind} '{slug}' {version}: {origin}")
+                    return source, origin, None
+            return None, None, "no-listing"
 
     if mode in ("auto", "source"):
         source, origin, reason = gather.gather_from_wordpress(
@@ -189,6 +204,12 @@ _GATHER_REASONS = {
                              "(older releases are pruned from the directory)",
     "download-failed": "download failed (network or CDN error)",
     "bad-archive": "the downloaded archive could not be extracted",
+    "no-listing": "no exposed directory listing on the target, and target mode "
+                  "gathers nothing else - pass a licensed archive via "
+                  "--source-dir DIR, or use --audit-code auto/source for "
+                  "wordpress.org downloads",
+    "no-operator-archive": "no matching archive in --source-dir for this exact "
+                           "component and version",
 }
 
 

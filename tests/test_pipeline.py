@@ -1872,6 +1872,38 @@ def test_spray_candidates_strip_www():
     assert access.spray_candidates("https://x/", custom_list=["pw"]) == ["pw"]
 
 
+# ------------------------------------------------------------- target-mode audit honesty (P1-6)
+
+def test_audit_target_mode_no_listing_reports_reason(mock, tmp_path, monkeypatch):
+    """target mode + no listing must surface the component as unaudited with
+    a reason, not make it silently disappear."""
+    from wpbuddy import codeaudit
+    monkeypatch.chdir(tmp_path)
+    args = SimpleNamespace(audit_code="target", verify_pocs=False, source_dir=None)
+
+    report = Report()
+    codeaudit.run(report, mock, {"plugins": {"contact-form-7": "5.3.1"}}, args)
+    text = report.doc.write()
+    assert "contact-form-7" in text                       # named, not silent
+    assert "no exposed directory listing" in text         # the reason
+
+
+def test_audit_target_mode_uses_operator_archive(mock, tmp_path, monkeypatch):
+    """--source-dir with an exact archive is honored even in target mode."""
+    from wpbuddy import codeaudit
+    monkeypatch.chdir(tmp_path)
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "plugin-contact-form-7-5.3.1.zip").write_bytes(_plugin_zip_bytes("contact-form-7", "5.3.1"))
+    args = SimpleNamespace(audit_code="target", verify_pocs=False, source_dir=str(src))
+
+    report = Report()
+    audited = codeaudit.run(report, mock, {"plugins": {"contact-form-7": "5.3.1"}}, args)
+    text = report.doc.write()
+    assert audited.get("contact-form-7") is not None      # audited, not skipped
+    assert "operator-provided archive" in text
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

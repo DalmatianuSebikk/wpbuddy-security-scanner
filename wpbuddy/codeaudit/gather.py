@@ -91,7 +91,7 @@ def _listing_entries(html, dir_url):
     return entries
 
 
-def gather_from_wordpress(kind, slug, version, dest, source_dir=None):
+def gather_from_wordpress(kind, slug, version, dest, source_dir=None, operator_only=False):
     """Get the EXACT version's source for a component, trying several ways.
 
     Resolution order:
@@ -102,6 +102,10 @@ def gather_from_wordpress(kind, slug, version, dest, source_dir=None):
        URL-naming edge cases and says definitively when a component is not
        hosted there at all)
     3. the classic direct-URL guess as a fallback
+
+    operator_only=True stops after step 1 (used by target-mode audits:
+    an operator archive never touches the target, wordpress.org is off
+    limits there by contract - P1-6).
 
     Every successful extraction is version-VERIFIED (the archive's own
     Version:/Stable tag header must match); a mismatch is audited anyway but
@@ -115,6 +119,8 @@ def gather_from_wordpress(kind, slug, version, dest, source_dir=None):
         if archive is not None:
             return _use_archive(archive, dest, kind, slug, version,
                                 f"operator-provided archive ({archive.name})")
+    if operator_only:
+        return None, None, "no-operator-archive"
 
     link, note = _api_download_link(kind, slug, version)
     if link is not None:
