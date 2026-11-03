@@ -14,6 +14,7 @@ default scan.
 import random
 
 from .. import httpclient, obfuscate
+from ..passive import files  # no cycle: passive never imports active at module level
 
 WORDPRESS_ORG_API = "https://api.wordpress.org/plugins/info/1.2/"
 
@@ -55,16 +56,20 @@ def _blanket_deny(target):
 def probe_slug(target, slug, strict_200=False):
     """True when /wp-content/plugins/<slug>/readme.txt proves the plugin exists.
 
-    A 200 always counts (plainly or via an obfuscation bypass). A 403 counts
-    only while the server is known NOT to blanket-deny this path class
-    (strict_200=False): with a blanket rule in place, 403 answers every slug
-    and says nothing about existence.
+    A 200 only counts when the body is NOT junk: WAFs serve their challenge
+    interstitials with HTTP 200, and catch-all rewrites answer every path
+    with a soft-404 page - either one used to "install" every probed slug
+    (P1-2). A 403 counts only while the server is known NOT to blanket-deny
+    this path class (strict_200=False): with a blanket rule in place, 403
+    answers every slug and says nothing about existence.
     """
     resp, _ = obfuscate.fetch_first_allowed(
         f"{target}wp-content/plugins/{slug}/readme.txt", retries=1)
     if resp is None:
         return False
-    return resp.status_code == 200 or (resp.status_code == 403 and not strict_200)
+    if resp.status_code == 200:
+        return not files.response_is_junk(resp, target)
+    return resp.status_code == 403 and not strict_200
 
 
 def enumerate_plugins(report, target, slugs):
@@ -79,8 +84,9 @@ def enumerate_plugins(report, target, slugs):
     report.section("Plugin slug enumeration (invasive)")
     report.paragraph(f"Brute-forcing {len(slugs)} popular plugin slugs against "
                      f"`wp-content/plugins/<slug>/readme.txt` (one request per slug, "
-                     f"enabled by --enum-plugins). A 200 or 403 answer means the plugin "
-                     f"directory exists on the target.")
+                     "enabled by --enum-plugins). An answer counts only when its content "
+                     "is a real response - WAF challenge pages and soft-404 catch-alls "
+                     "arrive as HTTP 200 too and are rejected.")
 
     deny_is_noise = _blanket_deny(target)
     if deny_is_noise:
@@ -90,6 +96,11 @@ def enumerate_plugins(report, target, slugs):
                          "ones, so the 401/403s here are a blanket firewall rule, **not** "
                          "evidence that a plugin exists. Only answers whose content actually "
                          "came back (HTTP 200, some via path obfuscation) are counted.")
+
+    # learn the site's junk/soft-404 signature ONCE before the loop (cached
+    # either way, but front-loading keeps the two baseline probes out of the
+    # per-slug request stream)
+    files.soft404_baseline(target)
 
     installed = []
     for done, slug in enumerate(slugs, 1):

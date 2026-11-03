@@ -1775,6 +1775,43 @@ def test_advisory_bounds_promote_assumed_to_bounded():
     assert vulndb.affected_vulnerabilities("6.6.8", multi)[0]["basis"] == "bounded"
 
 
+# ------------------------------------------------------------- enum junk-200 rejection (P1-2)
+
+def test_enum_rejects_challenge_200(monkeypatch):
+    """A WAF serving its challenge page with HTTP 200 for every readme probe
+    must not 'install' every slug."""
+    from wpbuddy.active import enumerate as slug_enum
+    challenge = FakeResp(200, "<html><head><title>One moment, please...</title>"
+                              "<body>Checking your browser</body></html>")
+
+    def fake_get(url, **kw):
+        if "wpbuddy-" in url:               # baseline probes: also junk-shaped
+            return challenge
+        return challenge
+
+    monkeypatch.setattr(httpclient, "get", fake_get)
+    installed = slug_enum.enumerate_plugins(Report(), "https://waf.example.com/",
+                                            ["akismet", "contact-form-7"])
+    assert installed == []
+
+
+def test_enum_counts_real_readme_200(monkeypatch):
+    from wpbuddy.active import enumerate as slug_enum
+
+    def fake_get(url, **kw):
+        if url.endswith("akismet/readme.txt"):
+            return FakeResp(200, "=== Akismet ===\nStable tag: 5.3\nTags: spam\n"
+                                 "Requires at least PHP 7.0.\n== Changelog ==\n5.3 fix")
+        if "wpbuddy-" in url:
+            return FakeResp(404, "404")     # honest 404s: no soft-404 baseline
+        return FakeResp(404, "<html><body>404</body></html>")
+
+    monkeypatch.setattr(httpclient, "get", fake_get)
+    installed = slug_enum.enumerate_plugins(Report(), "https://plain.example.com/",
+                                            ["akismet", "contact-form-7"])
+    assert installed == ["akismet"]
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
