@@ -1934,6 +1934,41 @@ def test_theme_discovered_on_inner_page(mock, monkeypatch):
     assert "innertheme" in results["themes"]
 
 
+# ------------------------------------------------------------- 2FA-safe login detection (P1-9)
+
+def test_login_2fa_challenge_counts_as_valid(monkeypatch):
+    """A correct password that lands on a 2FA challenge is 'valid with MFA',
+    not a wrong password."""
+    challenge = FakeResp(
+        200,
+        "<html><body><form method='post'>"
+        "<input type='text' name='two-factor-code' />"
+        "<input type='submit' value='Log In' /></form>"
+        "<p>Enter the verification code from your authenticator app.</p></body></html>",
+        url="https://x.example.com/wp-login.php?action=2fa")
+    challenge.history = [FakeResp(302, "", url="https://x.example.com/wp-login.php")]
+    monkeypatch.setattr(httpclient, "post", lambda url, **kw: challenge)
+
+    assert credentials.login_outcome(challenge) == "mfa"
+
+    report = Report()
+    password = credentials.dictionary_attack(report, "https://x.example.com/",
+                                             "admin", ["hunter2"])
+    assert password == "hunter2"                  # the password IS correct
+    text = report.doc.write()
+    assert "MFA pending" in text
+
+    # a re-rendered login form (password field present) is still a failure
+    login_form = FakeResp(200, "<form><input name='log'><input name='pwd'></form>",
+                          url="https://x.example.com/wp-login.php")
+    assert credentials.login_outcome(login_form) == "failed"
+
+    # plain redirect into wp-admin is plain success
+    ok = FakeResp(200, "dashboard", url="https://x.example.com/wp-admin/")
+    ok.history = [FakeResp(302, "", url="https://x.example.com/wp-login.php")]
+    assert credentials.login_outcome(ok) == "success"
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

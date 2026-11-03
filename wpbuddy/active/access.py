@@ -25,6 +25,7 @@ from datetime import date
 
 from .. import config, httpclient
 from . import xmlrpc
+from .credentials import login_outcome
 
 REGISTRATION_BLOCKED = ("registration is currently not allowed",
                         "registration has been disabled",
@@ -102,12 +103,13 @@ def urlsplit_host(target):
     return urlsplit(target).hostname or ""
 
 
-def password_spray(report, target, user_candidates, passwords, via_xmlrpc=False):
+def password_spray(report, target, user_candidates, passwords, via_xmlrpc=False, mfa=None):
     """One attempt per user per password round. Returns {(user): password}.
 
     Stops entirely (no further rounds) once a hit is found OR the login
     endpoint becomes unreachable - grinding on against a blocking/dead login
-    only generates noise and lockouts.
+    only generates noise and lockouts. Users whose password was accepted but
+    hit a 2FA challenge are added to the optional `mfa` set (P1-9).
     """
     found = {}
     for index, password in enumerate(passwords, 1):
@@ -121,9 +123,11 @@ def password_spray(report, target, user_candidates, passwords, via_xmlrpc=False)
                 print("[!] xmlrpc.php became unreachable during the spray; stopping")
                 break
         else:
-            hit, alive = _spray_round_wplogin(target, user_candidates, password)
+            hit, alive, outcome = _spray_round_wplogin(target, user_candidates, password)
             if hit:
                 found[hit] = password
+                if mfa is not None and outcome == "mfa":
+                    mfa.add(hit)
                 break
             if not alive:
                 print("[!] wp-login.php became unreachable during the spray "
@@ -133,14 +137,14 @@ def password_spray(report, target, user_candidates, passwords, via_xmlrpc=False)
 
 
 def _spray_round_wplogin(target, users, password):
-    """One attempt per user. Returns (hit_user_or_None, login_reachable)."""
+    """One attempt per user. Returns (hit_user_or_None, login_reachable, outcome)."""
     for user in users:
         resp = _login_post(target, user, password)
         if resp is None:
-            return None, False  # unreachable after retries - caller must stop
+            return None, False, None  # unreachable after retries - caller must stop
         if credentials_success(resp):
-            return user, True
-    return None, True
+            return user, True, login_outcome(resp)
+    return None, True, None
 
 
 def _spray_round_xmlrpc(target, users, password):
@@ -203,7 +207,9 @@ def run_access(report, target, args, enumerated_users, xmlrpc_alive, dict_list=N
 
     print(f"[*] Credential testing via {note}: {len(passwords)} password(s) x {len(valid)} user(s)")
     via_xmlrpc = args.via_xmlrpc and xmlrpc_alive
-    found = password_spray(report, target, valid, passwords, via_xmlrpc=via_xmlrpc)
+    mfa_users = set()
+    found = password_spray(report, target, valid, passwords, via_xmlrpc=via_xmlrpc,
+                           mfa=mfa_users)
 
     if found:
         for user, password in found.items():
@@ -212,6 +218,14 @@ def run_access(report, target, args, enumerated_users, xmlrpc_alive, dict_list=N
                          + ", ".join(f"`{u}` / `{p}`" for u, p in found.items())
                          + f"** (via {'XML-RPC multicall' if via_xmlrpc else 'wp-login.php'}, "
                            f"{note})")
+        if mfa_users:
+            print(f"[!] 2FA challenge pending for: {', '.join(sorted(mfa_users))} "
+                  "(passwords are correct)")
+            report.paragraph("**Credentials valid, MFA pending** for "
+                             + ", ".join(f"`{u}`" for u in sorted(mfa_users))
+                             + ": the password was accepted and a second factor was asked. "
+                               "The password is still a working credential for channels "
+                               "without the UI factor.")
         report.paragraph("**Recommendation:** force unique, long passwords + MFA on all accounts, "
                          "and enable login rate limiting that also watches XML-RPC.")
     else:
