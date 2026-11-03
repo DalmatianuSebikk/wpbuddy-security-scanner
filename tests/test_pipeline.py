@@ -2718,8 +2718,9 @@ def test_posture_report_rendering(monkeypatch):
     posture.check(report, "https://down.example.com/")
     assert "Could not establish TLS" in report.doc.write()
 
-    # no resolver tool available -> email part skipped explicitly
-    monkeypatch.setattr(posture.shutil, "which", lambda name: None)
+    # no resolver tool available -> _txt_records reports None -> email part
+    # is skipped explicitly, never faked
+    monkeypatch.setattr(posture, "_txt_records", lambda name, rtype="TXT": None)
     report = Report()
     posture.check(report, "https://www.example.com/")
     assert "Email posture skipped" in report.doc.write()
