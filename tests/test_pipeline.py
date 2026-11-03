@@ -1986,6 +1986,45 @@ def test_package_data_resolves_and_version_is_single_sourced():
         pass  # repo checkout without installation: nothing installed to compare
 
 
+# ------------------------------------------------------------- cache/extraction hygiene (P1-11)
+
+def test_failed_extraction_leaves_no_partial_tree(tmp_path):
+    """A bad archive must not leave a half-extracted destination behind."""
+    import io as _io
+    dest = tmp_path / "dest"
+    result = gather._use_archive(_io.BytesIO(b"this is not a zip"), dest,
+                                 "plugin", "x", "1.0", "test origin")
+    assert result == (None, None, "bad-archive")
+    assert not dest.exists()
+
+
+def test_unclassifiable_cache_is_wiped_and_regathered(mock, tmp_path, monkeypatch):
+    """A cache directory without marker and without the mirror layout is
+    partial/corrupt: it is discarded (not audited) and re-gathered clean."""
+    from urllib.parse import urlsplit
+    from wpbuddy import codeaudit
+    monkeypatch.chdir(tmp_path)
+    cache = tmp_path / "wpbuddy-audit" / urlsplit(mock).hostname / "plugin-foo-1.0"
+    (cache / "official").mkdir(parents=True)
+    (cache / "official" / "stale.php").write_text("<?php // partial junk\n")
+
+    def fake_gather_from_wordpress(kind, slug, version, dest, source_dir=None,
+                                   operator_only=False):
+        Path(dest).mkdir(parents=True, exist_ok=True)
+        (Path(dest) / "fresh.php").write_text("<?php\n")
+        return dest, "official wordpress.org distribution, version 1.0", None
+
+    monkeypatch.setattr(codeaudit.gather, "gather_from_wordpress",
+                        fake_gather_from_wordpress)
+    args = SimpleNamespace(audit_code="source", verify_pocs=False, source_dir=None)
+    audited = codeaudit.run(Report(), mock, {"plugins": {"foo": "1.0"}}, args)
+
+    assert audited.get("foo") is not None            # re-gathered and audited
+    assert not (cache / "official" / "stale.php").exists()   # stale content wiped
+    assert (cache / "official" / "fresh.php").exists()
+    assert (cache / ".origin").read_text().strip() == "official"
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

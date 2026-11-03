@@ -17,6 +17,7 @@ import posixpath
 import re
 import zipfile
 from pathlib import Path
+from shutil import rmtree
 from urllib.parse import unquote, urljoin, urlsplit
 from xml.sax.saxutils import unescape
 
@@ -197,6 +198,9 @@ def _use_archive(archive, dest, kind, slug, version, origin):
         safe_extract_zip(archive, dest)
     except (zipfile.BadZipFile, OSError) as e:
         print(f"[!] Bad archive for {slug} {version}: {e}")
+        # no half-extracted tree may survive (P1-11): a partial destination
+        # would later look like a complete cached source
+        rmtree(dest, ignore_errors=True)
         return None, None, "bad-archive"
     found = _extracted_version(dest, kind, slug)
     if found and compare_versions(found, version) != 0:

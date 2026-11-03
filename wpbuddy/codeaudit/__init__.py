@@ -16,6 +16,7 @@ be reviewed manually after the scan.
 """
 
 from pathlib import Path
+from shutil import rmtree
 from urllib.parse import urlsplit
 
 from .. import config
@@ -76,6 +77,11 @@ def run(report, target, passive_results, args):
                 passive_files.check_directory_listing(report, target, slug, f"{kind}s")
             if version and path.exists():
                 source, origin, mirrored = _load_cached_source(path, version)
+                if source is None:
+                    # Unclassifiable cache (interrupted gather, dead
+                    # extraction, pre-marker junk): never audit it and never
+                    # build the fresh gather on top of its remains (P1-11).
+                    rmtree(path, ignore_errors=True)
             else:
                 source, origin = None, None
             if source is None:
