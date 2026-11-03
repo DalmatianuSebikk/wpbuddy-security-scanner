@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 
 from .. import config
 from ..passive import files as passive_files  # listing finding (P1-7); no cycle
-from . import analyzer, gather, poc
+from . import analyzer, deps, gather, poc
 
 _MODES = ("auto", "target", "source", "off")
 
@@ -98,6 +98,8 @@ def run(report, target, passive_results, args):
                 findings = poc.verify_findings(report, target, kind, findings, mirrored)
             if mirrored and version:
                 _integrity_check(report, label, kind, slug, version, path)
+            inventory, dep_advisories = deps.scan(source)
+            deps.report_dependencies(report, label, inventory, dep_advisories)
             _report_component(report, label, origin, source, findings)
             audited[slug] = findings
             pack_entries += [

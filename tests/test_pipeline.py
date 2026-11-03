@@ -2572,6 +2572,55 @@ def test_plugin_version_from_assets_when_readme_unreadable(mock, monkeypatch):
     assert asset_node["version_source"] == "asset-ver"
 
 
+# ------------------------------------------------------------- dependency SCA (F-6)
+
+def test_dependency_sca_finds_vendored_cves(tmp_path):
+    """composer.lock with an old PHPMailer inside a plugin tree is flagged
+    with the fix boundary; package.json pins land in the inventory."""
+    from wpbuddy.codeaudit import deps
+    tree = tmp_path / "vendor-tree"
+    (tree / "vendor").mkdir(parents=True)
+    (tree / "composer.lock").write_text(json.dumps({
+        "packages": [
+            {"name": "phpmailer/phpmailer", "version": "v5.2.16"},
+            {"name": "guzzlehttp/guzzle", "version": "7.9.0"},
+        ],
+        "packages-dev": [{"name": "phpunit/phpunit", "version": "9.6.0"}],
+    }))
+    (tree / "package.json").write_text(json.dumps({
+        "dependencies": {"left-pad": "1.3.0", "lodash": "^4.17.0"}}))
+
+    inventory, advisories = deps.scan(tree)
+    names = {name for name, _v, _s in inventory}
+    assert {"phpmailer/phpmailer", "guzzlehttp/guzzle", "phpunit/phpunit",
+            "left-pad", "lodash"} <= names
+    # ^ lodash is a range: inventoried, never matched
+    assert len(advisories) == 1
+    a = advisories[0]
+    assert a["package"] == "phpmailer/phpmailer"
+    assert a["installed"] == "5.2.16"
+    assert a["fixed_in"] == "5.2.27"
+    assert "CVE-2016-10045" in a["why"]
+
+    report = Report()
+    deps.report_dependencies(report, "plugin x 1.0", inventory, advisories)
+    text = report.doc.write()
+    assert "phpmailer/phpmailer 5.2.16" in text
+    assert "fixed in **5.2.27**" in text
+    assert "supply-chain surface" in text
+
+
+def test_dependency_sca_clean_tree(tmp_path):
+    from wpbuddy.codeaudit import deps
+    (tmp_path / "composer.lock").write_text(json.dumps(
+        {"packages": [{"name": "guzzlehttp/guzzle", "version": "7.9.0"}]}))
+    inventory, advisories = deps.scan(tmp_path)
+    assert advisories == []
+    report = Report()
+    deps.report_dependencies(report, "plugin x", inventory, advisories)
+    assert "guzzlehttp/guzzle 7.9.0" in report.doc.write()
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
