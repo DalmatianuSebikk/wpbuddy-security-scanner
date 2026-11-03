@@ -87,9 +87,14 @@ def spray_candidates(target, custom_list=None):
         return list(custom_list)
     from ..config import DATA_DIR
     templates = config.load_lines(DATA_DIR / "sprayPasswords.txt")
-    host = (urlsplit_host(target) or "target").split(".")[0].lower()
+    # {host} is the SITE's name, not the www CNAME in front of it: scanning
+    # www.example.com must spray 'example2026!', never 'www2026!' (P1-5)
+    host = (urlsplit_host(target) or "target").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    label = host.split(".")[0] or "target"
     year = str(date.today().year)
-    return [t.replace("{host}", host).replace("{year}", year) for t in templates]
+    return [t.replace("{host}", label).replace("{year}", year) for t in templates]
 
 
 def urlsplit_host(target):

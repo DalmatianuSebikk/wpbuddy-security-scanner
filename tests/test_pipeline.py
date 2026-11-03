@@ -1858,6 +1858,20 @@ def test_headers_hsts_only_expected_over_https(monkeypatch):
     assert "**Strict-Transport-Security** -" in text
 
 
+def test_spray_candidates_strip_www():
+    """www.example.com derives 'example<year>!' passwords, not 'www<year>!'."""
+    from datetime import date
+    year = str(date.today().year)
+    candidates = access.spray_candidates("https://www.example.com/")
+    assert candidates[0] == f"example{year}!"
+    assert not any(p.startswith("www") for p in candidates)
+
+    candidates = access.spray_candidates("https://shop.example.co.uk/")
+    assert candidates[0] == f"shop{year}!"
+
+    assert access.spray_candidates("https://x/", custom_list=["pw"]) == ["pw"]
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
