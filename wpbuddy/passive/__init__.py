@@ -79,7 +79,14 @@ def _scan_core(report, target, model):
     report.paragraph("Vulnerabilities known to affect this core version "
                      "(includes issues fixed in later releases - the site is only patched by updating):")
 
-    vulns = vulndb.affected_vulnerabilities(version, vulndb.core_vulnerabilities(version))
+    vulns, status = vulndb.core_lookup(version)
+    if status != "ok":
+        print("[!] Core vulnerability lookup failed - vulnerability database unreachable")
+        report.paragraph("**Vulnerability lookup failed** - the wpvulnerability.net database "
+                         "was unreachable, so this section says nothing about the site's real "
+                         "exposure. Re-run the scan before trusting a 'clean' verdict here.")
+        return
+    vulns = vulndb.affected_vulnerabilities(version, vulns)
     vulns = vulndb.enrich_core_with_nvd(version, vulns)
     if not vulns:
         report.paragraph("No known vulnerabilities in the wpvulnerability.net database for this version.")
@@ -174,7 +181,12 @@ def _scan_plugins(report, target, args, namespaces, model, pages, refs, artifact
             continue
         tier = confidence.tier_for(
             confidence.score(presence[slug], version_kind=version_kinds[slug]))
-        vulns = vulndb.plugin_vulnerabilities(slug)
+        vulns, status = vulndb.plugin_lookup(slug)
+        if status != "ok":
+            report.paragraph(f"**{slug}** {version} {confidence.label(tier)} - vulnerability "
+                             f"**lookup failed** (database unreachable); applicability unknown. "
+                             f"Do not read this as 'no vulnerabilities'.")
+            continue
         if vulns is None:
             report.paragraph(f"**{slug}** {version} {confidence.label(tier)} (version from "
                              f"the target's readme.txt) - not present in the vulnerability "
@@ -242,8 +254,11 @@ def _scan_themes(report, target, model):
             print(f"[*] Theme {slug}: version {version} ({kind}) [{tier}]")
             report.paragraph(f"Theme **{slug}** version: **{version}** {confidence.label(tier)} "
                              f"(from {src})")
-            vulns = vulndb.theme_vulnerabilities(slug)
-            if vulns is None:
+            vulns, db_status = vulndb.theme_lookup(slug)
+            if db_status != "ok":
+                report.paragraph(f"Theme **{slug}** {version} - vulnerability **lookup "
+                                 f"failed** (database unreachable); applicability unknown.")
+            elif vulns is None:
                 report.paragraph(f"**{slug}** - not present in the vulnerability database.")
             else:
                 affected = vulndb.affected_vulnerabilities(version, vulns, slug=slug)

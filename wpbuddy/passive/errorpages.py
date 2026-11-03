@@ -174,9 +174,13 @@ def write_report(report, known_plugins=()):
         from .. import vulndb
         for slug in new_plugins:
             try:
-                vulns = vulndb.plugin_vulnerabilities(slug)
-                known = "not in the vulnerability database" if vulns is None else \
-                    f"{len(vulns)} recorded vulnerabilities (any version)"
+                vulns, db_status = vulndb.plugin_lookup(slug)
+                if db_status != "ok":
+                    known = "lookup failed (database unreachable)"
+                elif vulns is None:
+                    known = "not in the vulnerability database"
+                else:
+                    known = f"{len(vulns)} recorded vulnerabilities (any version)"
             except Exception:
                 known = "lookup failed"
             report.bullets([f"**{slug}** - {known}"])

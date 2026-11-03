@@ -415,7 +415,7 @@ def test_errorpage_ignores_release_notes_mentioning_errors():
 def test_errorpage_report_section(monkeypatch):
     from wpbuddy.passive import errorpages
     errorpages.reset()
-    monkeypatch.setattr(vulndb, "plugin_vulnerabilities", lambda slug: [{"fake": 1}])
+    monkeypatch.setattr(vulndb, "plugin_lookup", lambda slug: ([{"fake": 1}], "ok"))
     errorpages.inspect(FakeResp(500, ECOMEDBT_TRACE, url="https://ecomedbt.ro/?author=1"))
     report = Report()
     errorpages.write_report(report, known_plugins={"wordfence"})
@@ -1601,6 +1601,66 @@ def test_cached_mirror_inferred_without_marker(mock, tmp_path, monkeypatch):
     args = NS(audit_code="target", verify_pocs=False, source_dir=None)
     findings = codeaudit.run(Report(), mock, {"plugins": {"vuln": "1.0"}}, args)["vuln"]
     assert findings and findings[0]["file"].startswith("wp-content/")
+
+
+# ------------------------------------------------------------- DB reachability honesty (P0-4)
+
+def test_lookup_statuses_distinguish_failure_from_clean(monkeypatch):
+    """'unreachable' (transport failed) vs 'not-found' (API answered: unknown
+    slug) vs 'ok' with an empty list (known and clean)."""
+    monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: None)  # outage
+    assert vulndb.core_lookup("6.4") == (None, "unreachable")
+    assert vulndb.plugin_lookup("x") == (None, "unreachable")
+    assert vulndb.theme_lookup("x") == (None, "unreachable")
+
+    monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: (None, "not-found"))
+    assert vulndb.plugin_lookup("unknown-slug") == (None, "not-found")
+
+    monkeypatch.setattr(vulndb, "_fetch",
+                        lambda kind, slug: ({"vulnerability": None}, "ok"))
+    vulns, status = vulndb.plugin_lookup("clean-slug")
+    assert status == "ok" and vulns == []
+
+
+def test_core_report_failure_vs_clean(monkeypatch):
+    """An API outage must read as 'lookup failed', never as
+    'No known vulnerabilities'."""
+    from wpbuddy import passive
+    monkeypatch.setattr(passive.core_version, "discover_core_version",
+                        lambda target: [("6.4.3", "meta-generator", "meta generator tag")])
+    monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: None)
+
+    report = Report()
+    passive._scan_core(report, "https://x.example.com/", confidence.ScanModel())
+    text = report.doc.write()
+    assert "unreachable" in text and "lookup failed" in text
+    assert "No known vulnerabilities" not in text
+
+    # the API answering 'vulnerability: null' IS a clean result
+    monkeypatch.setattr(vulndb, "_fetch",
+                        lambda kind, slug: ({"vulnerability": None}, "ok"))
+    report = Report()
+    passive._scan_core(report, "https://x.example.com/", confidence.ScanModel())
+    text = report.doc.write()
+    assert "No known vulnerabilities" in text
+
+
+def test_plugin_report_failure_not_clean(monkeypatch):
+    from wpbuddy import passive
+    args = SimpleNamespace(pluginList=None, enum_plugins=False, max_pages=1)
+    monkeypatch.setattr(passive.fingerprints, "detect", lambda artifacts, ns: set())
+    monkeypatch.setattr(passive.readme, "find_component_version",
+                        lambda target, kind, slug: ("1.0", "readme.txt", "stable-tag"))
+    monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: None)
+
+    report = Report()
+    passive._scan_plugins(report, "https://x.example.com/", args, [],
+                          confidence.ScanModel(), ["https://x.example.com/"],
+                          {"plugins": {"someplugin"}, "themes": set()},
+                          {"pages_html": "", "cookies": set(), "headers": []})
+    text = report.doc.write()
+    assert "unreachable" in text
+    assert "not present in the vulnerability database" not in text
 
 
 def test_cli_rejects_bad_target():

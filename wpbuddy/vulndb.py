@@ -98,39 +98,85 @@ def _clean_name(raw_name, link):
 
 
 def _fetch(kind, slug):
-    """Return the `data` dict for an endpoint, or None (unknown/error/unreachable)."""
+    """Return `(data dict or None, status)` for an endpoint.
+
+    status: 'ok' (API answered), 'not-found' (definitive answer: unknown
+    slug), 'unreachable' (transport/JSON/API failure). A caller must never
+    read an outage as an empty result - "site is clean" off a dead API is
+    the worst failure mode this module has (P0-4).
+    """
     resp = httpclient.get(f"{API_BASE}/{kind}/{slug}/")
     if resp is None:
-        return None
+        return None, "unreachable"
     try:
         payload = resp.json()
     except ValueError:
-        return None
+        return None, "unreachable"
     if not isinstance(payload, dict) or payload.get("error"):
-        return None
+        return None, "not-found"
     data = payload.get("data")
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None, "not-found"
+    return data, "ok"
+
+
+def _lookup(kind, slug):
+    """_fetch() with normalization for stubbed/legacy return shapes.
+
+    Tests (and anything else) may stub `_fetch` with a bare dict (pre-P0-4
+    shape, meaning 'the API answered this') or None (meaning failure); real
+    calls return the (data, status) tuple above. All three are understood
+    so a None stub can never be misread as a clean lookup.
+    """
+    result = _fetch(kind, slug)
+    if isinstance(result, tuple):
+        return result
+    return (result, "ok") if isinstance(result, dict) else (None, "unreachable")
+
+
+def core_lookup(version):
+    """(vulnerability list or None, status) for a core version.
+
+    None + status != 'ok': the lookup failed; None must not be reported as
+    'no vulnerabilities'.
+    """
+    data, status = _lookup("core", major_minor(version))
+    if status != "ok":
+        return None, status
+    return data.get("vulnerability") or [], "ok"
 
 
 def core_vulnerabilities(version):
-    data = _fetch("core", major_minor(version))
-    if not data:
-        return []
-    return data.get("vulnerability") or []
+    """Back-compat wrapper: the list, or None when the lookup failed."""
+    vulns, _ = core_lookup(version)
+    return vulns
+
+
+def plugin_lookup(slug):
+    """(vulnerability list or None, status) for a plugin slug."""
+    data, status = _lookup("plugin", slug)
+    if status != "ok":
+        return None, status
+    return data.get("vulnerability") or [], "ok"
 
 
 def plugin_vulnerabilities(slug):
-    data = _fetch("plugin", slug)
-    if not data:
-        return None  # None = nothing known about this slug, [] = known & clean
-    return data.get("vulnerability") or []
+    """Back-compat wrapper: None = unknown slug or failed lookup, [] = clean."""
+    vulns, _ = plugin_lookup(slug)
+    return vulns
+
+
+def theme_lookup(slug):
+    """(vulnerability list or None, status) for a theme slug."""
+    data, status = _lookup("theme", slug)
+    if status != "ok":
+        return None, status
+    return data.get("vulnerability") or [], "ok"
 
 
 def theme_vulnerabilities(slug):
-    data = _fetch("theme", slug)
-    if not data:
-        return None
-    return data.get("vulnerability") or []
+    vulns, _ = theme_lookup(slug)
+    return vulns
 
 
 def is_affected(installed_version, operator):
