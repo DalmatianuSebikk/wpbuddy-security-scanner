@@ -172,61 +172,61 @@ pytest -q
 
 ## P2 — UX, robustness, hygiene
 
-### [ ] P2-1 — Create parent directories for `--output`
+### [x] P2-1 — Create parent directories for `--output` (3b0f4e8)
 
 - **Files:** `wpbuddy/report.py:46-48`
 - **Fix:** `Path(path).parent.mkdir(parents=True, exist_ok=True)` before writing; same for the JSON graph and PoC pack.
 - **Test:** `Report().write("nested/dir/r.md")` succeeds.
 
-### [ ] P2-2 — Fix numbered lists
+### [x] P2-2 — Fix numbered lists (188d87f)
 
 - **Files:** `wpbuddy/report.py:36-38`
 - **Fix:** add one `OrderedList` for the whole iterable, not one per item.
 - **Test:** output contains `1.`, `2.`, `3.`.
 
-### [ ] P2-3 — Validate CLI numeric arguments
+### [x] P2-3 — Validate CLI numeric arguments (e3523ad)
 
 - **Files:** `wpbuddy/cli.py` (`--timeout`, `--delay`, `--jitter`, `--max-pages`, `--max-users`, `--enum-limit`)
 - **Fix:** reject `--timeout <= 0`, negative delay/jitter; allow `0` for pages/users/limit. Use `parser.error` so the exit code is 2 and the message is actionable.
 - **Test:** each invalid value exits 2 with the flag named.
 
-### [ ] P2-4 — Warn on conflicting phase flags
+### [x] P2-4 — Warn on conflicting phase flags (0d1836f)
 
 - **Files:** `wpbuddy/cli.py`
 - **Fix:** `--stealth` + `--access`/`--user`/`--dict` → warning that credential testing will not run; `--dict` without access/user → warning that the dictionary is unused (or auto-enable access — document the choice).
 - **Test:** both warnings are printed on the mock.
 
-### [ ] P2-5 — DNS lookup timeout
+### [x] P2-5 — DNS lookup timeout (ed017da)
 
 - **Files:** `wpbuddy/passive/dangling.py:66-71`
 - **Fix:** run `getaddrinfo` in a small helper with a timeout (e.g. `concurrent.futures.ThreadPoolExecutor` + `future.result(timeout=3)`). A timeout must not abort the remaining hosts.
 - **Test:** monkeypatch a hanging resolver; check returns within the budget and later hosts are still processed.
 
-### [ ] P2-6 — Escape target-controlled text in Markdown
+### [x] P2-6 — Escape target-controlled text in Markdown (9c471c2)
 
 - **Files:** `wpbuddy/report.py`, plus callers that interpolate headers/robots/advisories
 - **Fix:** add `escape_md(text)` (backticks, `*`, `_`, `[`, `]`, leading `#`/`>`/`-`) and apply it to header values, server values and advisory names/links. Keep fenced code bodies raw, but guard against closing fences.
 - **Test:** a plugin slug with `*`/backticks and a header value with `#` render literally.
 
-### [ ] P2-7 — Put found credentials in the JSON graph (optionally mask console output)
+### [x] P2-7 — Put found credentials in the JSON graph (optionally mask console output) (a4d79d6)
 
 - **Files:** `wpbuddy/active/access.py:203-211`; `wpbuddy/confidence.py`
 - **Fix:** add a `credentials` node/edge (user + password, or a hash with `--mask-secrets`) to the graph. Add `--mask-secrets` for console/report output.
 - **Test:** JSON contains the found user/password; masked mode does not contain the plaintext.
 
-### [ ] P2-8 — Expand the default dictionary and add a newline
+### [x] P2-8 — Expand the default dictionary and add a newline (5cf4d9f)
 
 - **Files:** `data/numeparola.txt`
 - **Fix:** add a few hundred common/leaked passwords (or document that a real list must be supplied). Keep `sprayPasswords.txt` small and curated. Ensure files end with a newline.
 - **Test:** `config.load_lines()` returns > 200 entries for the dictionary.
 
-### [ ] P2-9 — Remove unused imports and dead code (or wire it up)
+### [x] P2-9 — Remove unused imports and dead code (or wire it up) (854a33b)
 
 - **Files:** `wpbuddy/cli.py:5` (`Path`); `wpbuddy/report.py:4` (`Bold`, `Italic`, `Link`); `wpbuddy/active/__init__.py:9` (`credentials`); `xmlrpc.bruteforce`; `files.check_directory_listing`
 - **Fix:** delete unused imports; keep `credentials` imported if used by tests, otherwise update tests. Wire `check_directory_listing` per P1-7. Add a lint config (`ruff`) with an unused-import rule.
 - **Test:** `ruff check wpbuddy` is clean.
 
-### [ ] P2-10 — Repo hygiene
+### [x] P2-10 — Repo hygiene (99497e1)
 
 - [ ] Add `LICENSE` (MIT, already declared in `pyproject`).
 - [ ] Untrack the four root `__pycache__/*.pyc` files (`git rm --cached`).
@@ -234,7 +234,7 @@ pytest -q
 - [ ] Add `SECURITY.md` (authorized-scan policy, disclosure) and a JSON-schema/version field for the knowledge graph.
 - [ ] Add `--timestamp-output` or auto-naming so reports are not overwritten.
 
-### [ ] P2-11 — Fix test isolation
+### [x] P2-11 — Fix test isolation (c277818)
 
 - **Files:** `tests/test_pipeline.py:20-34`
 - **Fix:** autouse-reset `files`, `waf`, `errorpages`, `httpclient` globals/session, `config.TARGET_HOST`, `config.PERSONA`, and all `config.*` overrides after each test. Add a fixture for the sent-URL recorder used by P0-2.
