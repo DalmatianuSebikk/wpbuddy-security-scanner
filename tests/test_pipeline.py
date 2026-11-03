@@ -2880,6 +2880,73 @@ def test_diff_against_previous_graph(mock, tmp_path, monkeypatch):
     assert "CVE-2020-99999" in text
 
 
+# ------------------------------------------------------------- PoC verifier hardening (F-11)
+
+def test_poc_multi_parameter_verification(monkeypatch):
+    """A sink reachable only through the SECOND parameter still verifies."""
+    from wpbuddy.codeaudit import poc
+    finding = {"rule": "xss-echo", "params": ["dead", "live"],
+               "description": "xss", "file": "x.php", "line": 1, "snippet": "s"}
+
+    def fake_get(url, params=None, retries=1, **kw):
+        if not params:
+            return FakeResp(200, "plain page")
+        if "dead" in params:
+            return FakeResp(200, "plain page")            # no reflection
+        return FakeResp(200, f"echo: {poc.XSS_PAYLOAD}")  # reflected raw
+
+    monkeypatch.setattr(httpclient, "get", fake_get)
+    result = poc.try_verify(finding, "https://x.example.com/f.php")
+    assert result and result["verified"]
+    assert result["poc"]["params"] == {"live": poc.XSS_PAYLOAD}
+
+    # entity-encoded reflection is NOT verified
+    def fake_get_escaped(url, params=None, retries=1, **kw):
+        if not params:
+            return FakeResp(200, "plain page")
+        from html import escape
+        return FakeResp(200, f"echo: {escape(poc.XSS_PAYLOAD)}")
+
+    monkeypatch.setattr(httpclient, "get", fake_get_escaped)
+    assert poc.try_verify(finding, "https://x.example.com/f.php") is None
+
+
+def test_poc_passwd_first_with_signature(monkeypatch):
+    from wpbuddy.codeaudit import poc
+    finding = {"rule": "file-inclusion", "params": ["page"],
+               "description": "lfi", "file": "y.php", "line": 1, "snippet": "s"}
+
+    def fake_get(url, params=None, retries=1, **kw):
+        if not params:
+            return FakeResp(200, "normal")
+        if "passwd" in (params.get("page") or ""):
+            return FakeResp(200, "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:")
+        return FakeResp(200, "normal")
+
+    monkeypatch.setattr(httpclient, "get", fake_get)
+    result = poc.try_verify(finding, "https://x.example.com/y.php")
+    assert result and result["verified"]
+    assert "actual /etc/passwd content" in result["evidence"]
+
+
+def test_poc_time_budget_stops_attempts(monkeypatch):
+    """A zero time budget means no live attempts - manual templates only."""
+    from wpbuddy.codeaudit import poc
+    calls = []
+
+    def fake_get(url, **kw):
+        calls.append(url)
+        return FakeResp(200, "page")
+
+    monkeypatch.setattr(httpclient, "get", fake_get)
+    finding = {"rule": "xss-echo", "params": ["q"],
+               "description": "xss", "file": "x.php", "line": 1, "snippet": "s"}
+    out = poc.verify_findings(Report(), "https://x.example.com/", "plugin",
+                              [finding], mirrored=False, limit=5, time_budget=0.0)
+    assert calls == []                       # no live attempts at all
+    assert out[0]["poc"]["verified"] is False  # template attached anyway
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

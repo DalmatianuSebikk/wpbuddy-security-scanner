@@ -52,6 +52,7 @@ MAX_USER_IDS = 25
 MAX_AUDIT_FILES = 60
 MAX_AUDIT_FILE_SIZE = 1_000_000  # skip files bigger than 1 MB (likely minified/assets)
 MAX_POC_VERIFICATIONS = 15       # live PoC attempts per scan (--verify-pocs)
+MAX_POC_TIME_BUDGET = 90.0       # wall-clock seconds for live PoC attempts (F-11)
 MAX_REPORT_FINDINGS = 40         # per component; extras are summarized, not listed
 MAX_POC_TEMPLATES = 20           # manual-PoC commands listed per component
 

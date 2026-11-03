@@ -23,6 +23,7 @@ the path starts at the plugin slug, so wp-content/plugins/ is prefixed.
 """
 
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
@@ -30,6 +31,7 @@ from urllib.parse import urlencode, urlsplit
 from .. import config, httpclient, stealth
 
 MARKER = "WpBuddyProbe7c9x"
+XSS_PAYLOAD = f"<script>console.log('{MARKER}')</script>"
 
 # rules we can verify without any risk of changing state on the target
 AUTO_RULES = {"xss-echo", "file-inclusion", "sqli-request"}
@@ -147,10 +149,22 @@ def try_verify(finding, url):
     """Benign live check of a finding at a reachable URL. Returns a dict or None.
 
     Result: {'verified': bool, 'evidence': str, 'poc': {...}}
+
+    Every parameter on the finding line is tried (F-11): a sink reached
+    through the second parameter is as verified as one reached through
+    the first.
     """
     if not finding.get("params"):
         return None
-    rule, param = finding["rule"], finding["params"][0]
+    for param in finding["params"]:
+        result = _try_verify_param(finding, url, param)
+        if result and result.get("verified"):
+            return result
+    return None
+
+
+def _try_verify_param(finding, url, param):
+    rule = finding["rule"]
     poc = build_poc(finding, url)
 
     baseline = httpclient.get(url, retries=1)
@@ -158,25 +172,32 @@ def try_verify(finding, url):
         return None  # not directly reachable - manual PoC only
 
     if rule == "xss-echo":
-        resp = httpclient.get(url, params={param: MARKER}, retries=1)
-        if resp is not None and resp.status_code == 200 and MARKER in resp.text \
+        resp = httpclient.get(url, params={param: XSS_PAYLOAD}, retries=1)
+        # the LITERAL payload must come back: an entity-encoded reflection
+        # (&lt;script&gt;) is escaped output, not an XSS (F-11)
+        if resp is not None and resp.status_code == 200 and XSS_PAYLOAD in resp.text \
                 and resp.text != baseline.text:
-            poc["params"] = {param: f"<script>console.log('{MARKER}')</script>"}
+            poc["params"] = {param: XSS_PAYLOAD}
             return {"verified": True, "rule": rule, "poc": poc,
-                    "evidence": f"marker `{MARKER}` sent as ?{param}= came back unescaped "
-                                f"in the response body"}
+                    "evidence": "payload `" + XSS_PAYLOAD + "` sent as ?" + param +
+                                "= came back UNESCAPED in the response body (reflected XSS)"}
 
     elif rule == "file-inclusion":
-        for payload in ("../../../../etc/hostname",
-                        "php://filter/convert.base64-encode/resource=readme.html"):
+        # /etc/passwd first: its content is unambiguous evidence (F-11)
+        for payload in ("../../../../etc/passwd",
+                        "php://filter/convert.base64-encode/resource=readme.html",
+                        "../../../../etc/hostname"):
             resp = httpclient.get(url, params={param: payload}, retries=1)
             if resp is None or resp.status_code != 200 or resp.text == baseline.text:
                 continue
+            evidence = (f"request with ?{param}={payload} returned a DIFFERENT body "
+                        f"than the baseline request - server-side file content "
+                        f"influenced by the parameter (local file inclusion)")
+            if "passwd" in payload and "root:" in (resp.text or ""):
+                evidence = (f"?{param}={payload} returned actual /etc/passwd content "
+                            f"(`root:` account lines) - confirmed local file inclusion")
             poc["params"] = {param: payload}
-            return {"verified": True, "rule": rule, "poc": poc,
-                    "evidence": f"request with ?{param}={payload} returned a DIFFERENT body "
-                                f"than the baseline request - server-side file content "
-                                f"influenced by the parameter (local file inclusion)"}
+            return {"verified": True, "rule": rule, "poc": poc, "evidence": evidence}
 
     elif rule == "sqli-request":
         resp = httpclient.get(url, params={param: "' " + MARKER}, retries=1)
@@ -190,20 +211,31 @@ def try_verify(finding, url):
     return None
 
 
-def verify_findings(report, target, kind, findings, mirrored, limit=config.MAX_POC_VERIFICATIONS):
-    """Attach verification/PoC info to findings. Returns findings with a 'poc' key."""
+def verify_findings(report, target, kind, findings, mirrored,
+                    limit=config.MAX_POC_VERIFICATIONS,
+                    time_budget=getattr(config, "MAX_POC_TIME_BUDGET", 90.0)):
+    """Attach verification/PoC info to findings. Returns findings with a 'poc' key.
+
+    Two budgets (F-11): at most `limit` live attempts and at most
+    `time_budget` wall-clock seconds; findings past either still get their
+    manual PoC template.
+    """
     budget = limit
+    started = time.monotonic()
     for finding in findings:
-        if budget <= 0:
-            break
-        url = url_for_finding(finding, target, kind, mirrored)
-        if finding["rule"] in AUTO_RULES and finding.get("params"):
-            result = try_verify(finding, url)
-            budget -= 1
-            if result and result["verified"]:
-                finding["poc"] = result
-                print(f"[!] PoC VERIFIED on target: {finding['rule']} at {url}")
-                continue
+        if budget <= 0 or time.monotonic() - started > time_budget:
+            print(f"[*] PoC verification budget reached ({limit} attempts / "
+                  f"{time_budget:.0f}s) - remaining findings get manual templates")
+            # fall through: unverified template below
+        else:
+            url = url_for_finding(finding, target, kind, mirrored)
+            if finding["rule"] in AUTO_RULES and finding.get("params"):
+                result = try_verify(finding, url)
+                budget -= 1
+                if result and result["verified"]:
+                    finding["poc"] = result
+                    print(f"[!] PoC VERIFIED on target: {finding['rule']} at {url}")
+                    continue
         finding["poc"] = {"verified": False, "rule": finding["rule"],
-                          "poc": build_poc(finding, url)}
+                          "poc": build_poc(finding, url_for_finding(finding, target, kind, mirrored))}
     return findings
