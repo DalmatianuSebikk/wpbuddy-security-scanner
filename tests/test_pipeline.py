@@ -2421,6 +2421,64 @@ def test_cli_report_has_remediation_priorities(mock, tmp_path, monkeypatch):
     assert "patch available" in text
 
 
+# ------------------------------------------------------------- authenticated mode (F-3)
+
+def test_auth_headers_attached_only_to_target_host(mock, monkeypatch):
+    """--cookie/--app-password ride along on target requests and NEVER on
+    requests to the data APIs."""
+    import base64 as _b64
+    from urllib.parse import urlsplit
+
+    from wpbuddy import config, httpclient
+    monkeypatch.setattr(config, "TARGET_HOST", urlsplit(mock).hostname)
+    monkeypatch.setattr(config, "AUTH_COOKIE", "wpbuddy_session=1")
+    monkeypatch.setattr(config, "AUTH_BASIC",
+                        _b64.b64encode(b"admin:dadadada").decode())
+
+    captured = {}
+
+    class FakeSession:
+        def request(self, method, url, timeout=None, headers=None, **kw):
+            captured[url] = headers
+            return FakeResp(404, "")
+
+    monkeypatch.setattr(httpclient, "SESSION", FakeSession())
+    httpclient.get(f"{mock}wp-login.php")
+    httpclient.get("https://api.wordpress.org/plugins/info/1.2/")
+
+    target_headers = captured[f"{mock}wp-login.php"]
+    api_headers = captured["https://api.wordpress.org/plugins/info/1.2/"]
+    assert target_headers["Cookie"] == "wpbuddy_session=1"
+    assert target_headers["Authorization"].startswith("Basic ")
+    assert "Cookie" not in api_headers and "Authorization" not in api_headers
+
+
+def test_cli_authenticated_surface_reported(mock, tmp_path, monkeypatch):
+    """--app-password maps the account: roles + dangerous capabilities."""
+    monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: None)
+    monkeypatch.chdir(tmp_path)
+    from wpbuddy import cli
+
+    output = tmp_path / "auth"
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--target", mock, "--pluginList", "", "--audit-code", "off",
+                  "--app-password", f"{VALID_USER}:{VALID_PASSWORD}",
+                  "--output", str(output)])
+    assert exc.value.code == 0
+    text = output.with_suffix(".md").read_text(encoding="utf-8")
+    assert "Authenticated surface" in text
+    assert "administrator" in text
+    assert "install_plugins" in text
+    assert "wp-admin" in text
+
+
+def test_cli_bad_app_password_format_rejected():
+    from wpbuddy import cli
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--target", "https://x.example.com/", "--app-password", "noseparator"])
+    assert exc.value.code == 1
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

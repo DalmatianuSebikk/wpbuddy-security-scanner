@@ -37,6 +37,11 @@ TARGET_HOST = None
 VULNDB_CACHE = None
 OFFLINE = False
 
+# Authenticated mode (F-3): operator-supplied credentials, attached to
+# requests ONLY for the scan target host (never to the data APIs).
+AUTH_COOKIE = None     # raw Cookie header value (--cookie)
+AUTH_BASIC = None      # pre-encoded Basic credentials (--app-password)
+
 # Passive crawling
 MAX_CRAWL_PAGES = 5
 

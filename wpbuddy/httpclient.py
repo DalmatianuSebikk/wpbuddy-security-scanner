@@ -74,6 +74,24 @@ def init_networking(persona=None, proxy=None, impersonate=False):
         print(f"[*] Routing all traffic through proxy {proxy}")
 
 
+def _auth_headers(url):
+    """Operator credentials (--cookie / --app-password, F-3) for the target
+    host ONLY: the same HTTP layer also talks to wpvulnerability.net, NVD
+    and wordpress.org, and site credentials must never leak there."""
+    from urllib.parse import urlsplit
+    if not config.TARGET_HOST:
+        return {}
+    host = (urlsplit(url).hostname or "").lower()
+    if host != config.TARGET_HOST:
+        return {}
+    headers = {}
+    if config.AUTH_COOKIE:
+        headers["Cookie"] = config.AUTH_COOKIE
+    if config.AUTH_BASIC:
+        headers["Authorization"] = f"Basic {config.AUTH_BASIC}"
+    return headers
+
+
 def request(method, url, *, timeout=None, retries=config.DEFAULT_RETRIES,
             retry_delay=config.RETRY_DELAY, referer=None, **kwargs):
     """Send an HTTP request with retries on connection-level failures.
@@ -106,6 +124,7 @@ def request(method, url, *, timeout=None, retries=config.DEFAULT_RETRIES,
                 headers["Referer"] = referer
                 headers["Sec-Fetch-Site"] = "same-origin"
             headers.update(extra_headers)
+            headers.update(_auth_headers(url))
             resp = SESSION.request(method, url, timeout=timeout, headers=headers, **kwargs)
             if resp.status_code == 429:
                 _note_rate_limited(resp)

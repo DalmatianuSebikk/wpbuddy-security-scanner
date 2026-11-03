@@ -43,6 +43,9 @@ def run(report, target, args, model=None):
     files.check_setup_wizard(report, target)
     files.check_headers(report, target)
     dangling.check(report, target, artifacts.get("pages_html", ""))
+    if config.AUTH_COOKIE or config.AUTH_BASIC:
+        from . import authcheck  # deferred: only imported when creds exist
+        authcheck.check(report, target)
     return results
 
 

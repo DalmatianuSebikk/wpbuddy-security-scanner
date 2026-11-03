@@ -126,6 +126,14 @@ Examples:
     parser.add_argument("--offline", action="store_true",
                         help="Serve vulnerability lookups from the local cache only - no requests "
                              "to wpvulnerability.net (prime it first with: wpbuddy db update)")
+    parser.add_argument("--cookie",
+                        help="Authenticated mode (F-3): raw Cookie header for the target, e.g. "
+                             "'wordpress_logged_in_x=...;wordpress_test_cookie=...' - "
+                             "attached to target requests only")
+    parser.add_argument("--app-password", metavar="USER:TOKEN",
+                        help="Authenticated mode (F-3): WordPress application password "
+                             "(application password, not the login password) sent as Basic auth "
+                             "to the target only")
     parser.add_argument("--version", action="version", version=f"WpBuddy {__version__}")
     return parser
 
@@ -282,6 +290,20 @@ def main(argv=None):
         print(error)
         sys.exit(1)
     config.TARGET_HOST = (urlparse(target).hostname or "").lower()
+
+    # Authenticated mode (F-3): credentials are applied by httpclient to
+    # target-host requests only.
+    if args.app_password:
+        user, sep, token = args.app_password.partition(":")
+        if not sep or not token:
+            print("--app-password must be USER:TOKEN (application password)")
+            sys.exit(1)
+        import base64
+        config.AUTH_BASIC = base64.b64encode(f"{user}:{token}".encode()).decode()
+        print(f"[*] Authenticated mode: application password for '{user}'")
+    if args.cookie:
+        config.AUTH_COOKIE = args.cookie
+        print("[*] Authenticated mode: raw cookie supplied")
 
     # --stealth promises "passive phase only", but the default --audit-code
     # mode ('auto') probes directory listings ON the target. Without an

@@ -117,6 +117,31 @@ class MockWPHandler(BaseHTTPRequestHandler):
             self._send(200, self._fixture("wp-json/users.json") or b"[]",
                        "application/json; charset=UTF-8")
             return
+        # Authenticated identity endpoint (F-3): answers only for the valid
+        # app-password credentials, REST-forbidden otherwise.
+        if path == "/wp-json/wp/v2/users/me":
+            import base64
+            import json as _json
+            auth = self.headers.get("Authorization", "")
+            ok = False
+            if auth.startswith("Basic "):
+                try:
+                    user, _, secret = base64.b64decode(auth[6:]).decode().partition(":")
+                    ok = user == VALID_USER and secret == VALID_PASSWORD
+                except Exception:
+                    ok = False
+            if ok:
+                self._send(200, _json.dumps({
+                    "id": 1, "name": "Admin Site", "slug": VALID_USER,
+                    "roles": ["administrator"],
+                    "capabilities": {"manage_options": True, "install_plugins": True,
+                                     "upload_files": True}}),
+                    "application/json; charset=UTF-8")
+            else:
+                self._send(403, '{"code":"rest_forbidden","message":"Sorry, you are not '
+                                'allowed to access this."}',
+                           "application/json; charset=UTF-8")
+            return
         if "rest_route" in query:  # other REST routes -> WP-style 404 error object
             self._send(404, '{"code":"rest_no_route","message":"No route was found"}',
                        "application/json; charset=UTF-8")
