@@ -144,9 +144,8 @@ def _integrity_check(report, label, kind, slug, version, path):
     """
     official_root = path / "official"
     if not official_root.is_dir():
-        source, _origin, _reason = gather.gather_from_wordpress(
-            kind, slug, version, official_root)
-        if not source:
+        fetched = gather.gather_from_wordpress(kind, slug, version, official_root)
+        if not fetched or not fetched[0]:
             return  # no official copy obtainable (commercial/custom) - nothing to diff
         print(f"[*] Integrity: fetched official {kind} '{slug}' {version} for comparison")
     base = official_root / slug
