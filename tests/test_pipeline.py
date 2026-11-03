@@ -1969,6 +1969,23 @@ def test_login_2fa_challenge_counts_as_valid(monkeypatch):
     assert credentials.login_outcome(ok) == "success"
 
 
+# ------------------------------------------------------------- packaging (P1-10)
+
+def test_package_data_resolves_and_version_is_single_sourced():
+    """The three data files resolve through config.DATA_DIR in both layouts
+    (repo checkout and installed wheel)."""
+    import wpbuddy
+    from wpbuddy import config
+    for name in ("pluginList.txt", "sprayPasswords.txt", "numeparola.txt"):
+        assert (config.DATA_DIR / name).is_file(), f"{name} not found in {config.DATA_DIR}"
+    # the wheel metadata version must equal wpbuddy.__version__ (single source)
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        assert version("wpbuddy") == wpbuddy.__version__
+    except PackageNotFoundError:
+        pass  # repo checkout without installation: nothing installed to compare
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

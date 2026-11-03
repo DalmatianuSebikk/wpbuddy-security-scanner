@@ -1,10 +1,10 @@
 [project]
 name = "wpbuddy"
-version = "0.2.0"
 description = "Open-source WordPress vulnerability scanner: passive & active scanning plus local plugin/theme code auditing"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+dynamic = ["version"]
 dependencies = [
     "requests>=2.28",
     "beautifulsoup4>=4.11",
@@ -19,14 +19,31 @@ covert = ["curl-cffi>=0.7"]
 wpbuddy = "wpbuddy.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.version]
+# single source of truth: the version lives in wpbuddy/__init__.py
+path = "wpbuddy/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["wpbuddy"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# ship the data files INSIDE the package so an installed wheel resolves
+# config.DATA_DIR without the repository checkout (P1-10)
+"data" = "wpbuddy/data"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

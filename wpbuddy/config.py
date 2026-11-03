@@ -3,7 +3,13 @@
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
+
+# The data files ship INSIDE the package in an installed wheel (pyproject's
+# force-include maps data/ to wpbuddy/data); a repository checkout keeps
+# them at the project root. Prefer the packaged copy, fall back to the repo
+# layout - both dev runs and installed-wheel runs must find them (P1-10).
+_PKG_DATA_DIR = Path(__file__).resolve().parent / "data"
+DATA_DIR = _PKG_DATA_DIR if _PKG_DATA_DIR.is_dir() else BASE_DIR / "data"
 
 # HTTP defaults (see wpbuddy.httpclient)
 DEFAULT_TIMEOUT = 10.0
