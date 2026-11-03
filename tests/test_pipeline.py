@@ -832,9 +832,9 @@ NVD_PAYLOAD = {"vulnerabilities": [{"cve": {
 
 
 def test_nvd_operator_parsed_from_cpe_ranges():
-    op = vulndb._nvd_parse_operator(NVD_PAYLOAD)
-    assert op == {"min_version": "7.1", "min_operator": "ge",
-                  "max_version": "7.1.2", "max_operator": "lt"}
+    operators = vulndb._nvd_parse_operator(NVD_PAYLOAD)
+    assert operators == [{"min_version": "7.1", "min_operator": "ge",
+                           "max_version": "7.1.2", "max_operator": "lt"}]
     # a plugin CPE under the same CVE must not bound CORE applicability
     plugin_only = {"vulnerabilities": [{"cve": {"configurations": [{"nodes": [{"cpeMatch": [{
         "criteria": "cpe:2.3:a:coolplugin:coolplugin:1.0:*:*:*:*:*:*:*",
@@ -849,8 +849,8 @@ def test_nvd_enrichment_bounds_and_refutes(monkeypatch):
     monkeypatch.setattr(vulndb.time, "sleep", lambda s: None)  # no rate-limit waits
 
     def fake_operator(cve_id):
-        return {"min_version": "7.1", "min_operator": "ge",
-                "max_version": "7.1.2", "max_operator": "lt"}
+        return [{"min_version": "7.1", "min_operator": "ge",
+                 "max_version": "7.1.2", "max_operator": "lt"}]
 
     monkeypatch.setattr(vulndb, "_nvd_operator", fake_operator)
     vulns = [
@@ -867,6 +867,31 @@ def test_nvd_enrichment_bounds_and_refutes(monkeypatch):
         {"name": "CVE-2026-93485", "description": "core issue", "link": "",
          "severity": None, "basis": "assumed"}])
     assert out[0]["basis"] == "refuted"    # above the range
+
+
+def test_nvd_disjoint_cpe_ranges_all_evaluated(monkeypatch):
+    """The P0-5 repro: first range '< 6.5.0', second '6.6.0 - < 6.7.0'.
+    An installed 6.6.8 is covered by the second range and must be bounded;
+    the old first-match-only logic refuted it."""
+    payload = {"vulnerabilities": [{"cve": {"configurations": [{"nodes": [{"cpeMatch": [
+        {"criteria": "cpe:2.3:a:wordpress:wordpress:*:*:*:*:*:*:*",
+         "versionEndExcluding": "6.5.0"},
+        {"criteria": "cpe:2.3:a:wordpress:wordpress:*:*:*:*:*:*:*",
+         "versionStartIncluding": "6.6.0", "versionEndExcluding": "6.7.0"},
+    ]}]}]}}]}
+    operators = vulndb._nvd_parse_operator(payload)
+    assert len(operators) == 2
+
+    vulndb._nvd_cache.clear()
+    monkeypatch.setattr(vulndb, "_nvd_operator", lambda cve_id: operators)
+
+    def vuln():
+        return {"name": "CVE-2026-54321", "description": "d", "link": "",
+                "severity": None, "basis": "assumed"}
+
+    assert vulndb.enrich_core_with_nvd("6.6.8", [vuln()])[0]["basis"] == "bounded"
+    assert vulndb.enrich_core_with_nvd("6.4.9", [vuln()])[0]["basis"] == "bounded"
+    assert vulndb.enrich_core_with_nvd("6.5.5", [vuln()])[0]["basis"] == "refuted"  # outside every range
 
 
 def test_nvd_operator_network_failure_keeps_assumed(monkeypatch):

@@ -285,11 +285,17 @@ def enrich_core_with_nvd(version, affected):
         if not cve:
             continue
         cve_id = cve.group(1).upper()
-        operator = _nvd_operator(cve_id)
-        if not operator:
+        operators = _nvd_operator(cve_id)
+        if not operators:
             continue
-        hit, _ = is_affected(version, operator)
-        vuln["basis"] = "bounded" if hit else "refuted"
+        results = [is_affected(version, operator) for operator in operators]
+        # ANY range including the version bounds the finding; only when EVERY
+        # range excludes it is the finding refuted - a CVE with disjoint ranges
+        # (< 6.5.0 and 6.6.0-6.7.0) must not be decided by its first entry (P0-5)
+        if any(hit for hit, _ in results):
+            vuln["basis"] = "bounded"
+        else:
+            vuln["basis"] = "refuted"
         if not vuln.get("severity"):
             severity = _nvd_cache.get(f"severity:{cve_id}")
             if severity:
@@ -307,9 +313,9 @@ def _nvd_throttle():
 
 
 def _nvd_operator(cve_id):
-    """Version-range operator for a WordPress-core CVE from NVD, or None.
+    """List of version-range operators for a WordPress-core CVE from NVD, or None.
 
-    One fetch per CVE caches both the applicability operator and the CVSS
+    One fetch per CVE caches both the applicability operators and the CVSS
     severity string (used to fill findings the primary API left unscored).
     """
     if cve_id in _nvd_cache:
@@ -332,15 +338,19 @@ def _nvd_operator(cve_id):
 
 
 def _nvd_parse_operator(payload):
-    """Extract a {min,max}_version/{min,max}_operator dict from an NVD record.
+    """List of {min,max}_version/{min,max}_operator dicts from an NVD record.
 
-    Only CPE criteria targeting wordpress:wordpress count - a CVE listing a
-    plugin under the same id must not bound CORE applicability.
+    ALL CPE criteria targeting wordpress:wordpress are collected: a CVE can
+    carry several disjoint ranges (< 6.5.0 and 6.6.0-6.7.0), and deciding by
+    the first entry alone once refuted an installed version the second range
+    clearly covers (P0-5). CPE for plugins under the same CVE are still
+    ignored - they must not bound CORE applicability.
     """
     try:
         configs = payload["vulnerabilities"][0]["cve"]["configurations"]
     except (KeyError, IndexError, TypeError):
         return None
+    operators = []
     for conf in configs or []:
         for node in conf.get("nodes", []) or []:
             for match in node.get("cpeMatch", []) or []:
@@ -365,8 +375,8 @@ def _nvd_parse_operator(payload):
                     operator = {"min_version": exact.group(1), "min_operator": "ge",
                                 "max_version": exact.group(1), "max_operator": "le"}
                 if operator:
-                    return operator
-    return None
+                    operators.append(operator)
+    return operators or None
 
 
 def _nvd_severity(payload):
