@@ -147,9 +147,12 @@ def test_sensitive_files_and_headers(mock):
     report = Report()
     files.check_headers(report, mock)
     text = report.doc.write()
-    # the mock sends no security headers at all - all must be reported missing
+    # the mock sends no security headers at all - all must be reported missing,
+    # except HSTS: the mock is plain HTTP and HSTS is HTTPS-only (P1-4)
     for header in files.SECURITY_HEADERS:
-        assert header in text
+        if header != "Strict-Transport-Security":
+            assert f"**{header}** -" in text
+    assert "**Strict-Transport-Security** -" not in text
     assert "PHP/8.2.0" in text  # technology disclosure
 
 
@@ -1836,6 +1839,23 @@ def test_response_is_junk_keeps_real_readmes(monkeypatch):
                             "</title></head><body>The page you requested "
                             "has been moved.</body></html>")
     assert files.response_is_junk(article, target)
+
+
+def test_headers_hsts_only_expected_over_https(monkeypatch):
+    """http:// targets must not get an HSTS-missing finding; https:// ones must."""
+    monkeypatch.setattr(httpclient, "get",
+                        lambda url, **kw: FakeResp(200, "", url=url))
+
+    report = Report()
+    files.check_headers(report, "http://plain.example.com/")
+    text = report.doc.write()
+    assert "**Strict-Transport-Security** -" not in text
+    assert "HTTPS" in text                        # the section explains why
+
+    report = Report()
+    files.check_headers(report, "https://secure.example.com/")
+    text = report.doc.write()
+    assert "**Strict-Transport-Security** -" in text
 
 
 def test_cli_rejects_bad_target():

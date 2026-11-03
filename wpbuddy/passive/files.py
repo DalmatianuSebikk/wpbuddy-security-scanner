@@ -121,18 +121,30 @@ def check_headers(report, target):
         report.paragraph("Could not fetch the homepage to inspect headers.")
         return
 
-    missing = [h for h in SECURITY_HEADERS if h not in resp.headers]
-    present = [h for h in SECURITY_HEADERS if h in resp.headers]
+    # HSTS is defined for HTTPS transport only - a browser never applies it
+    # to a plain-HTTP origin, so demanding it there is noise (P1-4). The
+    # expected set is therefore built per scheme.
+    https = (urlsplit(target).scheme or "http").lower() == "https"
+    expected = dict(SECURITY_HEADERS)
+    if not https:
+        del expected["Strict-Transport-Security"]
+
+    missing = [h for h in expected if h not in resp.headers]
+    present = [h for h in expected if h in resp.headers]
 
     if missing:
         print(f"[!] Missing security headers: {', '.join(missing)}")
         report.paragraph("The following hardening headers are **missing** (each is a low-severity "
                          "finding on its own; together they mean the site relies purely on "
                          "application-level defenses):")
-        report.bullets([f"**{h}** - {why}" for h, why in SECURITY_HEADERS.items() if h in missing])
+        report.bullets([f"**{h}** - {why}" for h, why in expected.items() if h in missing])
     if present:
         report.paragraph("Headers already present:")
         report.bullets([f"**{h}**: {resp.headers[h]}" for h in present])
+    if not https:
+        report.paragraph("`Strict-Transport-Security` is not listed above because the scan ran "
+                         "over plain HTTP - browsers only honour HSTS on HTTPS responses. Moving "
+                         "the site to HTTPS (then adding HSTS) is the recommendation.")
 
     for leak in ("Server", "X-Powered-By"):
         if leak in resp.headers:
