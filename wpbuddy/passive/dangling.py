@@ -12,12 +12,17 @@ means registering the domain - that is engagement work a scanner must not do.
 
 import re
 import socket
+import threading
 from urllib.parse import urlparse
 
 HOST_RE = re.compile(r"(?:https?:)?//([A-Za-z0-9.-]+\.[A-Za-z]{2,})(?=[/\"'\s<>)]|$)")
 
 # how many distinct external hosts to DNS-check (most-referenced first)
 MAX_HOSTS = 40
+
+# Hard per-host DNS budget (P2-5). getaddrinfo has no timeout of its own and
+# a wedged resolver used to stall the whole scan on one host.
+DNS_TIMEOUT = 3.0
 
 # namespace/infra hosts nobody owns that appear in tons of pages
 SKIP_HOSTS = {
@@ -63,9 +68,26 @@ def check(report, target, pages_html):
                      "to under active ownership.")
 
 
-def _resolves(host):
-    try:
-        socket.getaddrinfo(host, 80)
-        return True
-    except socket.gaierror:
-        return False
+def _resolves(host, timeout=None):
+    """DNS-resolve `host` under a hard timeout (default DNS_TIMEOUT).
+
+    The probe runs in a daemon thread rather than a ThreadPoolExecutor:
+    executor workers are joined at interpreter exit, so one wedged lookup
+    would hang the whole process. A timeout counts as 'resolves' - claiming
+    a 'dangling domain' off our own resolver outage would be a false
+    positive, and the remaining hosts still get their turn.
+    """
+    timeout = DNS_TIMEOUT if timeout is None else timeout
+    result = {}
+
+    def probe():
+        try:
+            socket.getaddrinfo(host, 80)
+            result["ok"] = True
+        except (socket.gaierror, OSError):
+            result["ok"] = False
+
+    thread = threading.Thread(target=probe, daemon=True, name=f"wpbuddy-dns-{host}")
+    thread.start()
+    thread.join(timeout)
+    return result.get("ok", True)

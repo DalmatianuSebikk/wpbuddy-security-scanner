@@ -2093,6 +2093,51 @@ def test_cli_conflicting_flag_warnings(mock, tmp_path, monkeypatch, capsys):
     assert "--dict without --access/--user" in out
 
 
+# ------------------------------------------------------------- DNS timeout (P2-5)
+
+def test_dangling_dns_timeout_returns_and_continues(monkeypatch):
+    """A hanging resolver must not stall the scan: the host times out as
+    'resolves' (no false 'dangling' claim) and later hosts are processed."""
+    import time as _time
+    from wpbuddy.passive import dangling
+    monkeypatch.setattr(dangling, "DNS_TIMEOUT", 0.3)
+
+    def hanging_getaddrinfo(host, port):
+        _time.sleep(30)
+        return []
+
+    monkeypatch.setattr(dangling.socket, "getaddrinfo", hanging_getaddrinfo)
+    start = _time.monotonic()
+    assert dangling._resolves("hang.example.org") is True   # timeout != dangling
+    elapsed = _time.monotonic() - start
+    assert elapsed < 5, f"resolver hang leaked through ({elapsed:.1f}s)"
+
+    def nxdomain(host, port):
+        raise dangling.socket.gaierror("name or service not known")
+
+    monkeypatch.setattr(dangling.socket, "getaddrinfo", nxdomain)
+    assert dangling._resolves("nx.example.org") is False
+
+    # the report path keeps going past a hanging host (through the REAL
+    # _resolves timeout, with the resolver hanging only for that host)
+    def selective_getaddrinfo(host, port):
+        if host == "hang.example.org":
+            _time.sleep(10)
+        raise dangling.socket.gaierror("name or service not known")
+
+    monkeypatch.setattr(dangling.socket, "getaddrinfo", selective_getaddrinfo)
+    monkeypatch.setattr(dangling, "DNS_TIMEOUT", 0.3)
+    start = _time.monotonic()
+    report = Report()
+    dangling.check(report, "https://site.example.com/",
+                   '<a href="https://hang.example.org/a.png">a</a>'
+                   '<a href="https://dead.example.org/b.png">b</a>')
+    assert _time.monotonic() - start < 5
+    text = report.doc.write()
+    assert "dead.example.org" in text        # later host still processed
+    assert "hang.example.org" not in text    # timeout is not 'dangling'
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
