@@ -119,6 +119,26 @@ Examples:
     return parser
 
 
+def _validate_numeric_args(parser, args):
+    """Fail fast with an actionable message instead of misbehaving deep
+    inside the scan (timeout<=0 surfaces as requests errors per request;
+    negative delays/jitter as TypeErrors inside the pacing code).
+    parser.error exits 2, argparse's argument-error code.
+    """
+    if args.timeout <= 0:
+        parser.error(f"--timeout must be > 0 seconds (got {args.timeout})")
+    if args.delay < 0:
+        parser.error(f"--delay must be >= 0 seconds (got {args.delay})")
+    if args.jitter is not None and args.jitter < 0:
+        parser.error(f"--jitter must be >= 0 seconds (got {args.jitter})")
+    if args.max_pages < 0:
+        parser.error(f"--max-pages must be >= 0 (got {args.max_pages})")
+    if args.max_users < 0:
+        parser.error(f"--max-users must be >= 0 (got {args.max_users})")
+    if args.enum_limit < 0:
+        parser.error(f"--enum-limit must be >= 0 (got {args.enum_limit})")
+
+
 def _normalize_target(raw):
     """Canonicalize an operator-supplied target URL.
 
@@ -155,6 +175,7 @@ def explicitly_passed(argv, flag):
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    _validate_numeric_args(parser, args)
 
     target, error = _normalize_target(args.target)
     if error:

@@ -2054,6 +2054,22 @@ def test_report_numbered_list_renders_sequence():
     assert "3. third" in text
 
 
+# ------------------------------------------------------------- CLI argument validation (P2-3)
+
+@pytest.mark.parametrize("flag,value", [
+    ("--timeout", "0"), ("--timeout", "-3"),
+    ("--delay", "-1"), ("--jitter", "-0.5"),
+    ("--max-pages", "-1"), ("--max-users", "-2"), ("--enum-limit", "-5"),
+])
+def test_cli_rejects_invalid_numeric_args(mock, flag, value, capsys):
+    """Invalid numeric flags exit 2 (argparse error) naming the flag."""
+    from wpbuddy import cli
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--target", mock, flag, value])
+    assert exc.value.code == 2
+    assert flag in capsys.readouterr().err
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
