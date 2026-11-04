@@ -295,6 +295,8 @@ class _FakeApp:
         _FakeApp.instances.append(self)
 
     def run(self):
+        if self.source is None:  # launcher mode: the operator just quits
+            return 0
         for event in self.source():
             self.board.apply(event)
         return 0
@@ -422,23 +424,21 @@ def test_run_flow_defaults_to_the_newest_recorded_run(tmp_path, monkeypatch):
     _write_events(newer / "events.jsonl", _script())
     os.utime(older / "events.jsonl", (1, 1))
     os.utime(newer / "events.jsonl", (2, 2))
+    # the launcher lists the newest run first
+    assert [str(path) for path, _ in flow._recorded_runs(flow.runs_root())] == \
+        ["wpbuddy-audit/new.test/runs/run-new/events.jsonl",
+         "wpbuddy-audit/old.test/runs/run-old/events.jsonl"]
+
+
+def test_run_flow_with_no_target_and_no_runs_opens_the_launcher(tmp_path, monkeypatch):
+    from wpbuddy.tui import app as flow
+
+    monkeypatch.chdir(tmp_path)  # no runs anywhere: the launcher still opens
     _FakeApp.instances.clear()
     monkeypatch.setattr(flow, "FlowApp", _FakeApp)
 
-    assert flow.run_flow([]) == 0
-    command = _FakeApp.instances[-1].command
-    assert "new.test" in command and "run-new" in command  # newest wins
-    assert "old.test" not in command
-
-
-def test_run_flow_with_no_target_and_no_runs_exits_2(tmp_path, monkeypatch, capsys):
-    from wpbuddy.tui import app as flow
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(flow, "FlowApp",
-                        lambda *a, **k: pytest.fail("nothing to show, nothing to run"))
-    assert flow.run_flow([]) == 2
-    assert "no recorded runs found - pass --target or --run" in capsys.readouterr().out
+    assert flow.run_flow([]) == 0  # the launcher replaced the exit-2 path
+    assert _FakeApp.instances[-1].kwargs["launcher"] is True
 
 
 def test_run_flow_without_textual_hints_and_spawns_nothing(monkeypatch, tmp_path, capsys):
@@ -460,6 +460,8 @@ def test_run_flow_without_textual_hints_and_spawns_nothing(monkeypatch, tmp_path
     assert flow.run_flow(["--run", str(events)]) == 2
     assert "pip install 'wpbuddy[tui]'" in capsys.readouterr().out
     assert flow.run_flow(["--target", "https://acme.test/"]) == 2
+    assert "pip install 'wpbuddy[tui]'" in capsys.readouterr().out
+    assert flow.run_flow([]) == 2  # the launcher path needs textual too
     assert "pip install 'wpbuddy[tui]'" in capsys.readouterr().out
 
 
@@ -716,14 +718,10 @@ def test_run_flow_finds_runs_under_the_stable_runs_root(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "RUNS_DIR", runs)
     run = runs / "acme.test" / "runs" / "20261104-120000-abc"
     _write_events(run / "events.jsonl", _script())
-    _FakeApp.instances.clear()
-    monkeypatch.setattr(flow, "FlowApp", _FakeApp)
 
     assert flow.runs_root() == runs  # honors config.RUNS_DIR like the store
-    assert flow.run_flow([]) == 0
-    app = _FakeApp.instances[-1]
-    assert "acme.test" in app.command  # found under the root, CWD irrelevant
-    assert app.board.stats()["status"] == "completed"
+    assert [path for path, _ in flow._recorded_runs(flow.runs_root())] == \
+        [run / "events.jsonl"]  # the launcher will list it, CWD irrelevant
 
 
 def test_run_flow_prefers_the_runs_root_over_legacy_cwd_runs(tmp_path, monkeypatch):
@@ -738,13 +736,9 @@ def test_run_flow_prefers_the_runs_root_over_legacy_cwd_runs(tmp_path, monkeypat
     _write_events(legacy_run / "events.jsonl", _script())
     os.utime(root_run / "events.jsonl", (3, 3))
     os.utime(legacy_run / "events.jsonl", (2, 2))
-    _FakeApp.instances.clear()
-    monkeypatch.setattr(flow, "FlowApp", _FakeApp)
-
-    assert flow.run_flow([]) == 0
-    command = _FakeApp.instances[-1].command
-    assert "new.test" in command  # the runs root is searched first
-    assert "old.test" not in command
+    # the launcher lists the runs root only (legacy runs stay reachable via --run)
+    runs = flow._recorded_runs(flow.runs_root())
+    assert [path for path, _ in runs] == [root_run / "events.jsonl"]
 
 
 def test_run_flow_falls_back_to_legacy_cwd_runs_when_root_empty(tmp_path, monkeypatch):
@@ -756,11 +750,13 @@ def test_run_flow_falls_back_to_legacy_cwd_runs_when_root_empty(tmp_path, monkey
     (tmp_path / "empty-root").mkdir(exist_ok=True)  # root present, no runs yet
     legacy = tmp_path / "wpbuddy-audit" / "old.test" / "runs" / "20260101-000000-aaa"
     _write_events(legacy / "events.jsonl", _script())
+    # an empty runs root lists nothing: the empty state is the launcher's answer
+    assert flow._recorded_runs(flow.runs_root()) == []
+    # ...and the legacy run is still openable through the explicit flag
     _FakeApp.instances.clear()
     monkeypatch.setattr(flow, "FlowApp", _FakeApp)
-
-    assert flow.run_flow([]) == 0  # pre-feature runs still open
-    assert "old.test" in _FakeApp.instances[-1].command
+    assert flow.run_flow(["--run", str(legacy / "events.jsonl")]) == 0
+    assert _FakeApp.instances[-1].board.stats()["status"] == "completed"
 
 
 def test_run_flow_spawns_and_tails_under_the_runs_root(tmp_path, monkeypatch):
@@ -977,5 +973,177 @@ def test_flow_app_http_response_does_not_rebuild_the_rail(tmp_path):
             app.apply_event(_event("phase-started", "active"))
             await pilot.pause()
             assert [id(child) for child in rail.children] != before  # phases rebuild it
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------- launcher
+
+def test_flow_app_launcher_mounts_by_default():
+    from wpbuddy.tui.app import FlowApp, LauncherScreen
+
+    app = FlowApp(launcher=True, board=ScanBoard())
+
+    async def scenario():
+        async with app.run_test():
+            assert isinstance(app.screen, LauncherScreen)  # the entry screen
+            assert app.query_one("#target")  # target input front and center
+
+    asyncio.run(scenario())
+
+
+def test_flow_app_launcher_builds_argv_from_control_states():
+    from wpbuddy.tui.app import FlowApp
+
+    app = FlowApp(launcher=True, board=ScanBoard())
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            screen = app.screen
+            app.query_one("#target").value = "https://acme.test/"
+            await pilot.pause()
+            argv = screen.built_argv()
+            assert argv[:4] == ["wpbuddy", "scan", "--target", "https://acme.test/"]
+            assert "--json" not in argv and "--profile" not in argv  # untoggled absent
+            assert app.command == "wpbuddy scan --target https://acme.test/"
+
+            app.query_one("#deep").toggle()
+            app.query_one("#json").toggle()
+            await pilot.pause()
+            argv = screen.built_argv()
+            assert argv[4:6] == ["--profile", "deep"]
+            assert "--json" in argv
+            assert app.command == "wpbuddy scan --target https://acme.test/ " \
+                                  "--profile deep --json"
+
+            app.query_one("#deep").toggle()  # untoggle: the flag disappears again
+            await pilot.pause()
+            assert "--profile" not in screen.built_argv()
+
+    asyncio.run(scenario())
+
+
+def test_flow_app_launcher_cycles_audit_mode_and_failure_gate():
+    from wpbuddy.tui.app import FlowApp
+
+    app = FlowApp(launcher=True, board=ScanBoard())
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            screen = app.screen
+            app.query_one("#target").value = "https://acme.test/"
+            await pilot.pause()
+            assert "--audit-code" not in screen.built_argv()  # default auto: absent
+            audit = app.query_one("#audit-code")
+            audit.press()  # auto -> off  (press() == a real click's Pressed)
+            await pilot.pause()
+            audit.press()  # off -> source
+            await pilot.pause()
+            argv = screen.built_argv()
+            assert argv[argv.index("--audit-code") + 1] == "source"
+
+            app.query_one("#fail-on").press()  # none -> critical
+            await pilot.pause()
+            argv = screen.built_argv()
+            assert argv[argv.index("--fail-on") + 1] == "critical"
+
+    asyncio.run(scenario())
+
+
+def test_flow_app_launcher_launch_transitions_to_the_observatory(tmp_path, monkeypatch):
+    from wpbuddy import config
+    from wpbuddy.tui import app as flow
+
+    runs = tmp_path / "runs-root"
+    monkeypatch.setattr(config, "RUNS_DIR", runs)
+    monkeypatch.chdir(tmp_path)  # the watcher must use the runs root, not CWD
+    events = runs / "acme.test" / "runs" / "20261104-120000-abc" / "events.jsonl"
+
+    def fake_popen(cmd, **kwargs):
+        return _FakePopen(cmd, events_path=events, events=_script(), **kwargs)
+
+    monkeypatch.setattr(flow.subprocess, "Popen", fake_popen)
+    _FakePopen.spawns.clear()
+    app = flow.FlowApp(launcher=True, board=ScanBoard())
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            app.query_one("#target").value = "https://acme.test/"
+            app.query_one("#json").toggle()
+            await pilot.pause()
+            app.query_one("#launch").press()
+            await pilot.pause()
+            await _settle(app)  # the observatory's pump drains the faked run
+            assert app.screen.query_one("#rail")  # the observatory took over
+            assert app.board.stats()["status"] == "completed"
+            assert app.launched_proc is _FakePopen.spawns[0]
+            spawn = _FakePopen.spawns[0]
+            assert spawn.cmd[:6] == [sys.executable, "-m", "wpbuddy.cli", "scan",
+                                     "--target", "https://acme.test/"]
+            assert "--json" in spawn.cmd  # exactly the toggled state
+            assert "--profile" not in spawn.cmd  # untoggled stays absent
+            assert app.command.startswith("wpbuddy scan --target https://acme.test/")
+
+    asyncio.run(scenario())
+
+
+def test_flow_app_launcher_lists_and_opens_previous_runs(tmp_path, monkeypatch):
+    from wpbuddy import config
+    from wpbuddy.tui import app as flow
+
+    runs = tmp_path / "runs-root"
+    monkeypatch.setattr(config, "RUNS_DIR", runs)
+    older = runs / "old.test" / "runs" / "20260101-000000-aaa"
+    newer = runs / "new.test" / "runs" / "20261104-120000-bbb"
+    _write_events(older / "events.jsonl", _script())
+    _write_events(newer / "events.jsonl", _script())
+    os.utime(older / "events.jsonl", (1, 1))
+    os.utime(newer / "events.jsonl", (2, 2))
+    app = flow.FlowApp(launcher=True, board=ScanBoard())
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            rows = [text for item in app.query_one("#previous").children
+                    for text in _item_texts(item)]
+            assert len(rows) == 2
+            assert rows[0].startswith("20261104-120000")  # newest first
+            assert "new.test" in rows[0] and "10 events" in rows[0]
+            assert "old.test" in rows[1] and "20260101-000000" in rows[1]
+
+            previous = app.query_one("#previous")
+            previous.focus()
+            previous.index = 0
+            await pilot.press("enter")  # open the selected run
+            await pilot.pause()
+            await _settle(app)
+            assert app.screen.query_one("#rail")  # replaying in the observatory
+            assert app.board.stats()["status"] == "completed"
+            assert str(newer / "events.jsonl") in app.command
+
+    asyncio.run(scenario())
+
+
+def test_flow_app_launcher_empty_runs_root_shows_the_empty_state(tmp_path, monkeypatch):
+    from wpbuddy import config
+    from wpbuddy.tui import app as flow
+    from wpbuddy.tui.app import LauncherScreen
+
+    runs = tmp_path / "runs-root"
+    runs.mkdir()
+    monkeypatch.setattr(config, "RUNS_DIR", runs)
+    monkeypatch.chdir(tmp_path)  # no legacy CWD runs either
+    app = flow.FlowApp(launcher=True, board=ScanBoard())
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            rows = [text for item in app.query_one("#previous").children
+                    for text in _item_texts(item)]
+            assert rows == ["no previous runs"]
+            previous = app.query_one("#previous")
+            previous.focus()
+            previous.index = 0
+            await pilot.press("enter")  # the empty-state row does nothing
+            await pilot.pause()
+            assert isinstance(app.screen, LauncherScreen)  # still on the launcher
 
     asyncio.run(scenario())
