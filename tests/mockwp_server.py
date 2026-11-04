@@ -123,6 +123,20 @@ class MockWPHandler(BaseHTTPRequestHandler):
             self._send(200, body)
             return
 
+        # Lab LFI endpoint (exploit runner): includes whatever file the
+        # ?page= parameter names - a traversal reaching wp-config.php
+        # answers with credential-bearing content (proof for the
+        # signal/artifact tiers). Anything else renders normally.
+        if path == "/wp-content/plugins/vulnplugin/lfi.php":
+            page = query.get("page", [""])[0]
+            if "wp-config.php" in page:
+                body = ("<?php\ndefine('DB_NAME', 'mockdb');\n"
+                        "define('DB_PASSWORD', 'lab-secret-lfi-proof');\n")
+            else:
+                body = "<html><body>normal page</body></html>"
+            self._send(200, body)
+            return
+
         # test endpoint: reports what the server actually received (header check)
         if path == "/wpbuddy-echo":
             import json

@@ -3384,6 +3384,95 @@ def test_poc_lfi_requires_content_signature(monkeypatch):
     assert "file signature" in result["evidence"]
 
 
+# ------------------------------------------------------------- exploit engine (§4)
+
+def test_exploit_runner_tiers_and_evidence(mock, tmp_path):
+    """Preconditions -> payload -> signature -> artifact, all recorded."""
+    from wpbuddy.engagement import Engagement
+    from wpbuddy.evidence import EvidenceStore
+    from wpbuddy.exploit.runner import ExploitRunner
+    from wpbuddy.exploit.templates import TEMPLATES
+
+    engagement = Engagement(target=mock, host="x", allowed_effects=("read",),
+                            authorization="lab test")
+    evidence = EvidenceStore(tmp_path / "run")
+    runner = ExploitRunner(mock, engagement, evidence=evidence)
+
+    result = runner.execute(TEMPLATES["lab-lfi-wpconfig-read"], confirmed=True)
+    assert result["tier"] == "artifact"
+    assert result["status"] == 200
+    assert result["evidence_artifact"] is not None
+    raw = Path(result["evidence_artifact"]).read_text(encoding="utf-8")
+    assert "DB_PASSWORD" in raw and "lab-lfi-wpconfig-read" in raw
+
+    result = runner.execute(TEMPLATES["lab-reflect-xss"], confirmed=True)
+    assert result["tier"] == "artifact"
+
+
+def test_exploit_runner_refuses_without_confirmation_and_effects(mock):
+    """No --yes -> Refused; undeclared effect -> Refused; unknown
+    preconditions fail closed."""
+    from wpbuddy.engagement import Engagement
+    from wpbuddy.exploit.runner import ExploitRunner, Refused
+    from wpbuddy.exploit.templates import TEMPLATES
+
+    engagement = Engagement(target=mock, host="x", allowed_effects=("read",))
+    runner = ExploitRunner(mock, engagement)
+
+    import pytest as _pytest
+    with _pytest.raises(Refused, match="not confirmed"):
+        runner.execute(TEMPLATES["lab-reflect-xss"], confirmed=False)
+
+    with _pytest.raises(Refused, match="allow effect"):
+        runner.execute(TEMPLATES["lab-demo-file-write"], confirmed=True)
+
+    # read-only runs once confirmed
+    result = runner.execute(TEMPLATES["lab-reflect-xss"], confirmed=True)
+    assert result["tier"] in ("signal-observed", "artifact")
+
+    # unknown precondition kinds fail closed
+    from wpbuddy.exploit.templates import ExploitTemplate
+    weird = ExploitTemplate(id="weird", component="x", kind="plugin", versions="all",
+                            preconditions=(("telepathy", "mood"),),
+                            request={"method": "GET", "path": "/"},
+                            detect={"body_contains": "x"})
+    ok, failed = runner.check_preconditions(weird)
+    assert not ok and failed[0][0] == "telepathy"
+
+
+def test_exploit_plan_mode_shows_requests_without_sending(mock, capsys):
+    """Default mode = plan only: gates and exact requests printed, zero
+    requests reach the target."""
+    from wpbuddy import exploit as exploit_cmd
+
+    with pytest.raises(SystemExit) as exc:
+        exploit_cmd.main(["--target", mock])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "PLAN" in out and "nothing is sent without --yes" in out
+    assert "lab-lfi-wpconfig-read" in out
+    assert "/wp-content/plugins/vulnplugin/lfi.php" in out
+    assert "gate: not confirmed (pass --yes" in out
+
+
+def test_exploit_cli_executes_and_records(mock, tmp_path, monkeypatch, capsys):
+    """--yes executes read-only lab templates, escalates tiers, records the
+    run (engagement + evidence artifacts)."""
+    monkeypatch.chdir(tmp_path)
+    from wpbuddy import exploit as exploit_cmd
+
+    with pytest.raises(SystemExit) as exc:
+        exploit_cmd.main(["--target", mock, "--yes", "--authorization", "lab"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "[artifact]" in out
+    assert "Exploit run recorded" in out
+    artifacts = list(tmp_path.glob("wpbuddy-audit/*/runs/*-exploit/artifacts/*"))
+    assert any("lab-lfi-wpconfig-read" in str(p) for p in artifacts)
+    engagements = list(tmp_path.glob("wpbuddy-audit/*/runs/*-exploit/engagement.json"))
+    assert len(engagements) == 1
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
