@@ -7,9 +7,10 @@ the evidence layer: ARTIFACTS - files an action produced or captured
 so stage 4 can replay reversals.
 
 Everything lands inside the run directory
-(`wpbuddy-audit/<host>/runs/<run_id>/artifacts/`), so a run stays a
-single self-describing unit: meta.json (what/when), engagement.json
-(scope), events.jsonl (timeline), artifacts/ (evidence files).
+(`<runs-dir>/<host>/runs/<run_id>/artifacts/`; default runs root
+`~/.wpbuddy/previous-runs`), so a run stays a single self-describing
+unit: meta.json (what/when), engagement.json (scope), events.jsonl
+(timeline), artifacts/ (evidence files).
 """
 
 from __future__ import annotations

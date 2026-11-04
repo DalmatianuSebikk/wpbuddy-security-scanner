@@ -52,13 +52,22 @@ produces `<output>.json` - a knowledge graph of the site (see below).
 ## Flow observatory (TUI)
 
 The whole scan flow - phases, checks, findings, event log - is visible on one screen,
-live or replayed from a recorded run:
+live or replayed from a recorded run. `wpbuddy flow` with no arguments opens a launcher
+first: type a target, tick what the run should do (deep discovery, slug enumeration,
+access test, code audit, PoC verification, JSON graph, failure gate), or pick a previous
+run from the list (Enter replays it). `c` copies the equivalent CLI command - the
+launcher is sugar over the canonical flags:
 
 ```bash
-pip install 'wpbuddy[tui]'                        # optional extra (Textual)
-wpbuddy flow --target https://example.com/        # watch a live scan
-wpbuddy flow --run wpbuddy-audit/<host>/runs/<id> # replay a recorded run
+pip install 'wpbuddy[tui]'                                    # optional extra (Textual)
+wpbuddy flow                                                  # launcher: pick target + functionality
+wpbuddy flow --target https://example.com/                    # watch a live scan
+wpbuddy flow --run ~/.wpbuddy/previous-runs/<host>/runs/<id>  # replay a recorded run
 ```
+
+Every scan records its run under `~/.wpbuddy/previous-runs/<host>/runs/<id>/` (timeline,
+engagement, artifacts) no matter which directory you started it from; `--runs-dir DIR`
+(scans and flow) points the runs root somewhere else.
 
 ## Confidence model
 

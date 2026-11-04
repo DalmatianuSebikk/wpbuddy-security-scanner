@@ -1,1 +1,1 @@
-"""Recorded scan runs (`wpbuddy-audit/<host>/runs/<run_id>/`)."""
+"""Recorded scan runs (`<runs-dir>/<host>/runs/<run_id>/`; default `~/.wpbuddy/previous-runs`)."""

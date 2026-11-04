@@ -2,10 +2,16 @@
 
 Status: **first shell shipped.** `wpbuddy flow` (aliases `tui`, `explain`; needs the
 optional `[tui]` extra) is a single screen with **no modes**: a live scan and a recorded
-run (`--run wpbuddy-audit/<host>/runs/<id>`) differ only in the event source. Shipped
+run (`--run <runs-root>/<host>/runs/<id>`) differ only in the event source. Shipped
 panes: banner/top bar, phase rail with per-phase detail, findings list, append-only event
 log and an about pane. The no-modes decision **supersedes the "Four modes" section** for
-the shipped shell. Later slices — explain pauses/breakpoints, lineage, confidence ledger
+the shipped shell. The launcher shipped as the entry screen: `wpbuddy flow` with no
+target opens it to pick a target, tick functionalities (deep/enum/access/verify-pocs/
+json, `--audit-code`/`--fail-on` cycles) or replay a previous run, then hands off to the
+same single screen — an entry screen, not a view mode, so "no modes" still stands. Runs
+record under the stable `~/.wpbuddy/previous-runs/<host>/runs/<id>/` (override
+`--runs-dir`), so replay paths no longer depend on the directory a scan started from.
+Later slices — explain pauses/breakpoints, lineage, confidence ledger
 and evidence panes — remain deferred per the delivery order below. The shared phase graph
 (`wpbuddy/engine/phases.py`), typed events (`wpbuddy/engine/events.py`), scan engine
 (`wpbuddy/engine/run.py`, `--explain`) and append-only run store

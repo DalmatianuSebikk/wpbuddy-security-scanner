@@ -148,7 +148,8 @@ Examples:
                              "confidence computation on stdout while scanning")
     parser.add_argument("--no-run-log", action="store_true",
                         help="Do not write the append-only run log "
-                             "(wpbuddy-audit/<host>/runs/<run_id>/events.jsonl)")
+                             "(<runs-dir>/<host>/runs/<run_id>/events.jsonl; "
+                             "default ~/.wpbuddy/previous-runs)")
     parser.add_argument("--runs-dir", metavar="DIR",
                         help="where runs are recorded (default ~/.wpbuddy/previous-runs)")
     parser.add_argument("--authorization", metavar="TEXT",
