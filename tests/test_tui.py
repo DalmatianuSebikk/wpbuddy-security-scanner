@@ -1147,3 +1147,45 @@ def test_flow_app_launcher_empty_runs_root_shows_the_empty_state(tmp_path, monke
             assert isinstance(app.screen, LauncherScreen)  # still on the launcher
 
     asyncio.run(scenario())
+
+
+def test_flow_app_launcher_seeds_the_copyable_command_on_mount():
+    from wpbuddy.tui.app import FlowApp
+
+    app = FlowApp(launcher=True, board=ScanBoard())
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            copied = []
+            app.copy_to_clipboard = copied.append
+            assert app.command == "wpbuddy scan"  # seeded before any input
+            app.query_one("#json").focus()  # out of the text field: `c` binds
+            await pilot.press("c")
+            await pilot.pause()
+            assert copied == ["wpbuddy scan"]  # `c` copies it immediately
+
+    asyncio.run(scenario())
+
+
+def test_flow_app_launcher_session_reports_source_errors_in_the_log_pane(tmp_path, monkeypatch):
+    from wpbuddy.tui import app as flow
+
+    def exploding_replay(path):
+        yield from _script()
+        raise RuntimeError("the run log vanished")
+
+    monkeypatch.setattr(flow, "replay", exploding_replay)
+    run = tmp_path / "wpbuddy-audit" / "acme.test" / "runs" / "20261104-120000-abc"
+    _write_events(run / "events.jsonl", _script())
+    app = flow.FlowApp(launcher=True, board=ScanBoard())
+
+    async def scenario():
+        async with app.run_test():
+            app.open_run(run / "events.jsonl")  # the launcher handoff (push_screen)
+            await _settle(app)
+            assert app.screen.query_one("#rail")  # the observatory took over
+            last = app.screen.query_one("#log").lines[-1].text
+            assert "event source failed: the run log vanished" in last
+            assert app.is_running  # no NoMatches traceback took the app down
+
+    asyncio.run(scenario())

@@ -236,7 +236,9 @@ class FlowApp(App):
 
     def _report_source_error(self, exc: Exception) -> None:
         """A frozen feed must be visible in the log pane, not silent."""
-        self.query_one("#log", RichLog).write(f"[!] event source failed: {exc}")
+        # screen-scoped: in launcher sessions the observatory is a pushed
+        # screen, and app-level queries root at the (launcher) default screen
+        self._pane("#log", RichLog).write(f"[!] event source failed: {exc}")
 
     # ------------------------------------------------------------ refresh
 
@@ -400,6 +402,7 @@ class LauncherScreen(Screen):
         self.query_one("#previous", ListView).border_title = "previous runs"
         self._refresh_runs()
         self.query_one("#target", Input).focus()
+        self._sync_command()  # `c` copies `wpbuddy scan` from the very start
 
     def _refresh_runs(self) -> None:
         """List every run under the runs root, newest first (or the empty state)."""
