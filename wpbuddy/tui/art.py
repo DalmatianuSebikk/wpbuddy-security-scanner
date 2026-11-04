@@ -6,12 +6,12 @@ authorization disclaimer. The CLI's argparse description and the TUI
 splash both render from here so the surfaces never drift apart.
 """
 
-LOGO = r"""__        __               ____                _       _
-\ \      / /       _ __   | __ )   _   _      | |     | |
- \ \ /\ / /       | '_ \  |  _ \  | | | | | | | | | | | | \   | |
-  \ V  V /        | |_) | | |_) | | |_| | | |_| | | |_| |  \  | |
-   \_/\_/         | .__/  |____/   \___/  \__,|_| \__,|_|   \ | |
-                  |_|                                        \|_|"""
+LOGO = r"""__        __                 ____                  _         _
+\ \      / /        _ __    | __ )    _   _       | |       | |
+ \ \ /\ / /        | '_ \   |  _ \   | | | |  |   | |   |   | |   \   | |
+  \ V  V /         | |_) |  | |_) |  | |_| |  |   | |   |   | |    \  | |
+   \_/\_/          | .__/   |____/    \___/   |___|_|   |___|_|     \ | |
+                   |_|                                               \|_|"""
 
 CLI_BANNER = LOGO + """
 
