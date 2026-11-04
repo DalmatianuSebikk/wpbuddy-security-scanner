@@ -239,6 +239,32 @@ class ScanModel:
             })
         return sorted(out, key=lambda item: item["risk"], reverse=True)
 
+    @staticmethod
+    def graph_diff(previous, current):
+        """What changed between two knowledge graphs (roadmap §2.2/F-10).
+
+        Returns {'new_components': [...], 'gone_components': [...],
+        'new_findings': [(component, label)], 'resolved_findings': [...]}.
+        """
+        def components(graph):
+            return {n["id"] for n in graph.get("nodes", [])
+                    if n.get("type") != "vulnerability"}
+
+        def findings(graph):
+            labels = {n["id"]: n.get("label", "?") for n in graph.get("nodes", [])}
+            return {(e.get("from"), labels.get(e.get("to"), "?"))
+                    for e in graph.get("edges", [])
+                    if e.get("relation") == "affected-by"}
+
+        prev_components, curr_components = components(previous), components(current)
+        prev_findings, curr_findings = findings(previous), findings(current)
+        return {
+            "new_components": sorted(curr_components - prev_components),
+            "gone_components": sorted(prev_components - curr_components),
+            "new_findings": sorted(curr_findings - prev_findings),
+            "resolved_findings": sorted(prev_findings - curr_findings),
+        }
+
     def credentials(self):
         return [n for n in self._nodes.values() if n["type"] == "credential"]
 

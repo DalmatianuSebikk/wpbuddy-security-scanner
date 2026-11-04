@@ -1,6 +1,7 @@
 """WpBuddy command line interface."""
 
 import argparse
+import json
 import sys
 import time
 from datetime import datetime
@@ -268,7 +269,80 @@ def _run_db_command(argv):
           + (f", {fail} failed" if fail else ""))
 
 
+# roadmap §2.2 - the CLI splits into subcommands; the historic flat flag
+# interface keeps working (it IS the scan subcommand) so no operator script
+# or test breaks. post/lab land with their roadmap stages.
+SUBCOMMANDS = ("scan", "exploit", "post", "db", "report", "lab")
+
+_SUBCOMMAND_HELP = """------------------------------------------------------------------
+Subcommands (roadmap section 2.2) - the flat flag interface stays valid
+and is equivalent to 'wpbuddy scan':
+  wpbuddy scan --target URL [flags]   passive + active + code audit scan
+  wpbuddy exploit --target URL        exploitation engine (plan-first)
+  wpbuddy post cleanup --run ID       replay a run's cleanup log
+  wpbuddy db status|update            local vulnerability cache (F-1)
+  wpbuddy report diff A.json B.json   compare two scan graphs
+  wpbuddy lab ...                     lab matrix (roadmap section 8)
+------------------------------------------------------------------"""
+
+
+def _dispatch_subcommand(name, argv):
+    from . import exploit as exploit_cmd
+    if name == "scan":
+        _cmd_scan(argv)
+    elif name == "exploit":
+        exploit_cmd.main(argv)
+    elif name == "db":
+        _run_db_command(argv)
+        sys.exit(0)
+    elif name == "report":
+        _cmd_report(argv)
+    else:
+        print(f"'{name}' is scaffolded but not implemented yet - it lands with its "
+              f"roadmap stage (see exploitation-roadmap.md).")
+        sys.exit(2)
+
+
+def _cmd_report(argv):
+    """`wpbuddy report diff` - graph comparison without a new scan (roadmap §2.2)."""
+    from .confidence import graph_diff
+    parser = argparse.ArgumentParser(prog="wpbuddy report", description="Report tooling")
+    sub = parser.add_subparsers(dest="report_command", required=True)
+    diff = sub.add_parser("diff", help="Compare two knowledge-graph JSONs")
+    diff.add_argument("previous", help="the earlier --json graph")
+    diff.add_argument("current", help="the later --json graph")
+    args = parser.parse_args(argv)
+
+    from pathlib import Path
+    try:
+        previous = json.loads(Path(args.previous).read_text(encoding="utf-8"))
+        current = json.loads(Path(args.current).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        parser.error(f"could not read graphs: {e}")
+
+    changes = graph_diff(previous, current)
+    if not any(changes.values()):
+        print("No component or vulnerability changes between the two graphs.")
+        return
+    for component in changes["new_components"]:
+        print(f"+ component: {component}")
+    for component in changes["gone_components"]:
+        print(f"- component: {component}")
+    for component, label in changes["new_findings"]:
+        print(f"+ finding:   {component}: {label}")
+    for component, label in changes["resolved_findings"]:
+        print(f"- finding:   {component}: {label}")
+
+
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in SUBCOMMANDS:
+        _dispatch_subcommand(argv[0], argv[1:])
+        return
+    _cmd_scan(argv)
+
+
+def _cmd_scan(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "db":
         _run_db_command(argv[1:])

@@ -3007,6 +3007,69 @@ def test_semgrep_findings_parsed_from_fake_binary(mock, tmp_path, monkeypatch):
     assert sg.scan(tmp_path) is None
 
 
+# ================================================================ exploitation roadmap
+
+# ------------------------------------------------------------- subcommand split (§2.2)
+
+def test_subcommands_dispatch_and_flat_mode_equivalent(mock, tmp_path, monkeypatch):
+    """'wpbuddy scan ...' and the historic flat flags are the same command;
+    'db' routes to the cache manager (F-1)."""
+    monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: None)
+    monkeypatch.chdir(tmp_path)
+    from wpbuddy import cli
+
+    out = tmp_path / "sub"
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["scan", "--target", mock, "--pluginList", "",
+                  "--audit-code", "off", "--output", str(out)])
+    assert exc.value.code == 0
+    assert out.with_suffix(".md").is_file()
+
+    flat = tmp_path / "flat"
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--target", mock, "--pluginList", "",
+                  "--audit-code", "off", "--output", str(flat)])
+    assert exc.value.code == 0
+    assert flat.with_suffix(".md").is_file()
+
+
+def test_report_diff_subcommand(tmp_path, capsys):
+    """'wpbuddy report diff' compares two graphs without a new scan."""
+    from wpbuddy import cli
+
+    def graph(components, findings):
+        nodes = [{"id": c, "type": "plugin", "label": c} for c in components]
+        nodes += [{"id": f"vuln:{c}:{i}", "type": "vulnerability", "label": lab}
+                  for i, (c, lab) in enumerate(findings)]
+        edges = [{"from": "site", "to": c, "relation": "runs"} for c in components]
+        edges += [{"from": c, "to": f"vuln:{c}:{i}", "relation": "affected-by"}
+                  for i, (c, lab) in enumerate(findings)]
+        return {"schema": 1, "target": "https://x/", "nodes": nodes, "edges": edges}
+
+    prev = tmp_path / "prev.json"
+    curr = tmp_path / "curr.json"
+    prev.write_text(json.dumps(graph(["plugin:old", "plugin:gone"],
+                                     [("plugin:old", "CVE-1")])))
+    curr.write_text(json.dumps(graph(["plugin:old", "plugin:new"],
+                                     [("plugin:old", "CVE-1"), ("plugin:new", "CVE-2")])))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["report", "diff", str(prev), str(curr)])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "+ component: plugin:new" in out
+    assert "- component: plugin:gone" in out
+    assert "+ finding:   plugin:new: CVE-2" in out
+
+
+def test_unimplemented_subcommands_say_so(capsys):
+    from wpbuddy import cli
+    for name in ("post", "lab"):
+        with pytest.raises(SystemExit) as exc:
+            cli.main([name])
+        assert exc.value.code == 2
+        assert "not implemented" in capsys.readouterr().out
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
