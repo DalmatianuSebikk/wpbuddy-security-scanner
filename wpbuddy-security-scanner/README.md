@@ -235,6 +235,11 @@ exercise the whole pipeline without touching a real target.
   notices pane that keeps every notification on screen, the full ASCII logo on
   the launcher, phase-failure tracebacks with an `e` binding that copies the
   last error to the clipboard, and a readable `?` about overlay at 80x24.
+- Phosphor-green TUI theme with a transparent backdrop (the terminal's own
+  background shows through), floating toasts replaced by an always-visible
+  notices window next to the findings, and the ASCII wordmark on the scan
+  screen whenever the terminal is tall enough (compact brand in the top bar
+  otherwise).
 
 ### v0.4.0
 
