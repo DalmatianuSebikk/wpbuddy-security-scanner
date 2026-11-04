@@ -45,11 +45,13 @@ class ScanBoard:
         self._state = {phase_id: "pending" for phase_id in self._specs}
         self._skip_reasons: dict[str, list[str]] = {}
         self._fail_messages: dict[str, str] = {}
+        self._fail_tracebacks: dict[str, str] = {}
+        self._last_failed: str | None = None
         self._requests = 0
         self._status = "pending"
         self._started_ts: str | None = None
         self._finished_ts: str | None = None
-        self._findings: list[tuple[str, str]] = []
+        self._findings: list[dict] = []
         self._log: list[str] = []
 
     # -------------------------------------------------------------- input
@@ -72,8 +74,16 @@ class ScanBoard:
             self._requests += 1
         elif event_type == "finding":
             label = str(data.get("severity") or "unrated").upper()
-            name = str(data.get("name") or data.get("detail") or "finding")
-            self._findings.append((label, name))
+            node_id = str(data.get("name") or data.get("detail") or "finding")
+            self._findings.append({
+                "label": label,
+                "node_id": node_id,
+                "detail": str(data.get("detail") or node_id),
+                "severity": data.get("severity"),
+                "score": data.get("score"),
+                "basis": data.get("basis"),
+                "component": str(data.get("component") or ""),
+            })
         self._log.append(_format_line(ts, phase, event_type, data))
 
     def _apply_phase_event(self, event_type, phase, data):
@@ -86,6 +96,8 @@ class ScanBoard:
             self._skip_reasons[phase] = [str(r) for r in (data.get("reasons") or [])]
         elif state == "failed":
             self._fail_messages[phase] = str(data.get("message") or "failed")
+            self._fail_tracebacks[phase] = str(data.get("traceback") or "")
+            self._last_failed = phase
 
     # ------------------------------------------------------------ outputs
 
@@ -113,11 +125,40 @@ class ScanBoard:
             lines.append(f"skipped: {reasons}")
         elif state == "failed":
             lines.append(f"failed: {self._fail_messages.get(phase_id, 'failed')}")
+            traceback = self._fail_tracebacks.get(phase_id) or ""
+            lines_all = [line.strip() for line in traceback.splitlines() if line.strip()]
+            # real format_exc() ends with the exception text (already in the
+            # message line) - the useful "where" is the last source frame.
+            at = next((line for line in reversed(lines_all) if line.startswith('File "')),
+                      lines_all[-1] if lines_all else "")
+            if at:
+                lines.append(f"at: {at}")
         return "\n".join(lines)
 
-    def findings(self) -> list[tuple[str, str]]:
-        """(severity-ish label, name) for every `finding` event so far."""
-        return list(self._findings)
+    def findings(self) -> list[dict]:
+        """A copy of every finding record folded so far."""
+        return [dict(record) for record in self._findings]
+
+    def finding_detail(self, index) -> str:
+        """The readable block for finding `index`, or '' when out of range."""
+        if index is None or not 0 <= index < len(self._findings):
+            return ""
+        record = self._findings[index]
+        lines = [f"{record['label']} · {record['detail']}"]
+        if record.get("score") is not None:
+            lines.append(f"score: {record['score']}")
+        if record.get("basis"):
+            lines.append(f"why: {record['basis']}")
+        lines.append(f"component: {record.get('component') or 'unknown'}")
+        lines.append(f"node: {record['node_id']}")
+        return "\n".join(lines)
+
+    def last_error(self) -> tuple[str, str] | None:
+        """(message, traceback) of the most recently failed phase, else None."""
+        if self._last_failed is None:
+            return None
+        return (self._fail_messages.get(self._last_failed, "failed"),
+                self._fail_tracebacks.get(self._last_failed) or "")
 
     def log_tail(self, n=200) -> list[str]:
         """The last n formatted `[ts] [phase] summary` lines."""

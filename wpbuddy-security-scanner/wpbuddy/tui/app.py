@@ -10,10 +10,12 @@ with an install hint before building any UI.
 Two surfaces, one app: `LauncherScreen` (the entry screen `wpbuddy flow`
 with no arguments opens — pick a target and functionalities, or open a
 previous run) hands off to `ObservatoryScreen` (the single observation
-surface: top bar, phase rail, phase detail, findings, event log — no
-modes). `?` overlays the about pane, `c` copies the command that produced
-the current state, `q` quits (interrupting a live scan with SIGINT to its
-process group first).
+surface: top bar, phase rail, phase detail, findings plus their
+`#finding-detail` pane, event log, and the persistent `#notices` pane —
+no modes). `?` overlays the about pane, `c` copies the command that
+produced the current state, `e` copies the last phase error (message +
+traceback), `tab` walks the panes, `q` quits (interrupting a live scan
+with SIGINT to its process group first).
 
 `run_flow` resolves the event source: `--run PATH` replays a recorded run,
 `--target URL` spawns a scan and tails its new run log, and anything else
@@ -23,6 +25,7 @@ opens the launcher.
 from __future__ import annotations
 
 import argparse
+import collections
 import importlib.util
 import json
 import os
@@ -55,7 +58,7 @@ except ImportError:  # pragma: no cover - only reachable without the extra
     Screen = object  # type: ignore[assignment,misc]
 
 # Key hints for the footers; the about pane repeats the observatory's.
-HINTS = "↑↓ phases  ?: about  q quit  c copy CLI"
+HINTS = "↑↓ phases  ?: about  e copy error  tab panes  q quit  c copy CLI"
 LAUNCHER_HINTS = "enter launch  ↑↓+enter open run  c copy CLI  q quit"
 _DESCRIPTION = ("WpBuddy Flow — the single-screen flow observatory: every phase, "
                 "finding and request of a scan, live or replayed, on one screen.")
@@ -77,6 +80,20 @@ _PHASE_EVENTS = ("phase-started", "phase-finished", "phase-skipped", "phase-fail
 _TOPBAR_EVENTS = ("http-response", "run-started", "run-finished")
 
 
+def _finding_row(record: dict) -> str:
+    """One readable findings row: label + human detail (+ score) + node id.
+
+    The node id is appended only when it is not already the human detail
+    (a finding without a human label falls back to the node id).
+    """
+    row = f"{record['label']} · {record['detail']}"
+    if record.get("score") is not None:
+        row += f" (score {record['score']})"
+    if record["detail"] != record["node_id"]:
+        row += f" · {record['node_id']}"
+    return row
+
+
 def textual_available() -> bool:
     """True when the textual extra is importable; never imports it."""
     return importlib.util.find_spec("textual") is not None
@@ -88,21 +105,32 @@ class FlowApp(App):
     CSS = """
     #header { height: 1; color: $accent; text-style: bold; }
     #topbar { height: 1; }
-    #mid { height: 1fr; }
+    #mid { height: 1fr; min-height: 13; }
     #rail { width: 38; border: round $panel; }
     #right { width: 1fr; }
     #detail { height: 1fr; border: round $panel; padding: 0 1; }
     #findings { height: 30%; border: round $panel; }
-    #log { height: 10; border: round $panel; }
-    #about { height: 1fr; border: thick $accent; padding: 0 1; }
+    #finding-detail { height: auto; max-height: 8; border: round $panel; }
+    #log { height: 8; border: round $panel; }
+    #notices { height: 6; border: round $panel; }
+    #about { layer: over; height: auto; max-height: 16;
+             width: auto; max-width: 96%; border: thick $accent; padding: 0 1;
+             background: $surface; }
     #footer { height: 1; color: $text-muted; }
+    ObservatoryScreen { layers: base over; overflow-y: auto; }
+    LauncherScreen { overflow-y: auto; }
+    LauncherScreen #header { height: auto; }
     LauncherScreen #options { height: auto; }
+    /* compact controls: the full logo + every control fit 80x24 */
+    LauncherScreen Checkbox { border: none; height: 1; }
+    LauncherScreen Input { border: none; height: 1; padding: 0; }
     LauncherScreen #cycles { height: 3; }
-    LauncherScreen #previous { height: 1fr; border: round $panel; }
+    LauncherScreen #previous { height: auto; min-height: 5; border: round $panel; }
     """
     BINDINGS = [
         Binding("q", "quit", "quit"),
         Binding("c", "copy_command", "copy CLI"),
+        Binding("e", "copy_error", "copy error"),
         Binding("question_mark", "toggle_about", "about"),
     ]
 
@@ -125,6 +153,16 @@ class FlowApp(App):
         self._rail_dirty = True  # first paint renders everything
         self._findings_dirty = True
         self._topbar_dirty = True
+        self._notices: collections.deque[str] = collections.deque(maxlen=50)
+
+    def notify(self, message, *args, **kwargs) -> None:
+        """Keep notices on screen: record each one, then show the native toast."""
+        self._notices.append(str(message))
+        super().notify(message, *args, **kwargs)
+        try:  # paint from the UI thread only, after the current refresh
+            self.call_after_refresh(self._refresh_notices)
+        except RuntimeError:  # app not running yet / already shut down
+            pass
 
     def get_default_screen(self):
         """The launcher for no-arg flow; the observatory for --run/--target."""
@@ -142,6 +180,7 @@ class FlowApp(App):
     def _observatory_ready(self) -> None:
         """The observatory screen is current: paint it and start the pump."""
         self.refresh_panes()
+        self._refresh_notices()  # notices recorded on the launcher appear here
         self._start_pump()
 
     def _launch_root(self) -> Path:
@@ -222,6 +261,10 @@ class FlowApp(App):
             self._findings_dirty = True
         if event_type in _TOPBAR_EVENTS:
             self._topbar_dirty = True
+        if event_type == "phase-failed":
+            data = event.get("data") or {}
+            self.notify(f"phase FAILED: {data.get('message') or 'failed'}",
+                        markup=False, severity="error")
         self.refresh_panes()
 
     def _pump_source(self) -> None:
@@ -269,10 +312,20 @@ class FlowApp(App):
             self._rail_dirty = False
             self._refresh_detail()  # a rebuilt rail can change the selected phase's text
         if self._findings_dirty:
-            self._rebuild_list("#findings", [f"{label} — {name}"
-                                             for label, name in self.board.findings()])
+            self._rebuild_list("#findings", [_finding_row(record)
+                                             for record in self.board.findings()])
             self._findings_dirty = False
         self._append_log()
+
+    def _refresh_notices(self) -> None:
+        """Replay the retained notices into the pane (bounded, newest at bottom)."""
+        try:
+            log = self._pane("#notices", RichLog)
+        except NoMatches:  # the observatory pane is not current yet
+            return
+        log.clear()
+        for line in self._notices:
+            log.write(line)
 
     def _rebuild_list(self, selector: str, rows: list[str]) -> None:
         """Swap a ListView's items, keeping the operator's selection."""
@@ -282,12 +335,19 @@ class FlowApp(App):
         view.extend([ListItem(Label(row, markup=False)) for row in rows])
         if selector == "#rail" and len(rows) and (selected is None or selected >= len(rows)):
             selected = 0  # a phase is always selected so detail is never empty
+        if selector == "#findings" and len(rows) and selected is None:
+            selected = len(rows) - 1  # newest finding fills #finding-detail
         if selected is not None and selected < len(rows):
             view.index = selected
 
     def _refresh_detail(self) -> None:
         phase_id = self._selected_phase_id()
         self._pane("#detail").update(self.board.detail(phase_id) if phase_id else "")
+
+    def _refresh_finding_detail(self) -> None:
+        """Follow the highlighted finding; rail refreshes never touch this pane."""
+        index = self._pane("#findings", ListView).index
+        self._pane("#finding-detail").update(self.board.finding_detail(index))
 
     def _selected_phase_id(self) -> str | None:
         phases = self.board.phases()
@@ -311,6 +371,8 @@ class FlowApp(App):
             return
         if event.control is self._pane("#rail", ListView):
             self._refresh_detail()
+        elif event.control is self._pane("#findings", ListView):
+            self._refresh_finding_detail()
 
     def on_list_view_highlighted(self, event) -> None:
         """Arrow keys highlight a rail row; the detail pane follows it too."""
@@ -318,12 +380,25 @@ class FlowApp(App):
             return
         if event.control is self._pane("#rail", ListView):
             self._refresh_detail()
+        elif event.control is self._pane("#findings", ListView):
+            self._refresh_finding_detail()
 
     # ------------------------------------------------------------- actions
 
     def action_copy_command(self) -> None:
         self.copy_to_clipboard(self.command)
         self.notify(f"copied: {self.command}", markup=False)  # operator input, not markup
+
+    def action_copy_error(self) -> None:
+        """Copy the last failure's message plus its last few traceback lines."""
+        error = self.board.last_error()
+        if error is None:
+            self.notify("no error to copy", markup=False)
+            return
+        message, traceback = error
+        frames = [line for line in traceback.splitlines() if line.strip()][-10:]
+        self.copy_to_clipboard((message + "\n" + "\n".join(frames)).rstrip())
+        self.notify("copied last error (message + traceback)", markup=False)
 
     def action_toggle_about(self) -> None:
         try:
@@ -353,7 +428,9 @@ class ObservatoryScreen(Screen):
             with Vertical(id="right"):
                 yield Static("", id="detail", markup=False)
                 yield ListView(id="findings")
+                yield Static("", id="finding-detail", markup=False)
         yield RichLog(max_lines=_LOG_WINDOW, id="log")  # bounded retention
+        yield RichLog(max_lines=50, id="notices", markup=False)
         yield Static(ABOUT_TEXT, id="about", markup=False)
         yield Static(HINTS, id="footer", markup=False)
 
@@ -362,7 +439,9 @@ class ObservatoryScreen(Screen):
         self.query_one("#rail", ListView).border_title = "phases"
         self.query_one("#detail", Static).border_title = "phase detail"
         self.query_one("#findings", ListView).border_title = "findings"
+        self.query_one("#finding-detail", Static).border_title = "finding detail"
         self.query_one("#log", RichLog).border_title = "event log"
+        self.query_one("#notices", RichLog).border_title = "notices"
         self.query_one("#rail", ListView).focus()  # ↑↓ drive the rail out of the box
         # App-level queries root at the CURRENT screen; while this screen is
         # being pushed the launcher is still current, so defer app work until
@@ -388,8 +467,7 @@ class LauncherScreen(Screen):
         self.fail_gate = "none"
 
     def compose(self):
-        yield Static(f"{LOGO.splitlines()[0]}  WpBuddy Flow — launcher",
-                     id="header", markup=False)
+        yield Static(LOGO, id="header", markup=False)
         yield Input(placeholder="https://target.example.com/", id="target")
         with Vertical(id="options"):
             yield Checkbox("Deep discovery  (--profile deep)", id="deep")

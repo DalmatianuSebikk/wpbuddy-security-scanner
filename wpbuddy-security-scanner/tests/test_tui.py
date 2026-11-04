@@ -10,8 +10,10 @@ everything here is unit-testable without a terminal.
 
 import ast
 import asyncio
+import html
 import json
 import os
+import re
 import signal
 import sys
 import threading
@@ -89,6 +91,31 @@ def test_phase_glyph_transitions_running_and_failed():
     assert "boom: nope" in board.detail("active")
 
 
+def test_failed_phase_keeps_traceback_and_last_frame_in_detail():
+    board = ScanBoard()
+    assert board.last_error() is None
+    traceback_text = (  # shaped like traceback.format_exc(): frames, then exception
+        'Traceback (most recent call last):\n'
+        '  File "/repo/wpbuddy/cli.py", line 210, in main\n'
+        "    rc = run_scan(args)\n"
+        '  File "/repo/wpbuddy/engine/run.py", line 84, in run_scan\n'
+        "    ok = _run_phase(phase, ctx)\n"
+        '  File "/repo/wpbuddy/passive/posture.py", line 87, in _tls_facts\n'
+        "    issuer = ', '.join(certs[0]['issuer'])\n"
+        "TypeError: sequence item 0: expected str instance, tuple found\n"
+    )
+    board.apply(_event("phase-failed", "passive",
+                       message="TypeError: sequence item 0: expected str instance, "
+                               "tuple found", traceback=traceback_text))
+    message, traceback = board.last_error()
+    assert message == "TypeError: sequence item 0: expected str instance, tuple found"
+    assert traceback == traceback_text
+    detail = board.detail("passive")
+    assert "TypeError: sequence item 0" in detail
+    assert "_tls_facts" in detail  # the LAST File frame, not the exception text
+    assert "at: File \"/repo/wpbuddy/passive/posture.py\", line 87, in _tls_facts" in detail
+
+
 def test_board_accepts_an_explicit_graph():
     graph = [PhaseSpec("a", "Alpha", "do a", handler="a"),
              PhaseSpec("b", "Beta", "do b", handler="b", effects=())]
@@ -115,10 +142,19 @@ def test_detail_for_phase_without_preconditions_or_unknown_id():
 
 # ----------------------------------------------------------------- findings
 
-def test_findings_pair_severity_label_with_name():
+def test_findings_expose_severity_detail_and_context():
     board = _scripted_board()
-    assert ("LOW", "readme.html exposed") in board.findings()
+    record = board.findings()[0]
+    assert record["label"] == "LOW"
+    assert record["severity"] == "low"
+    assert record["detail"] == "readme.html exposed"
+    assert record["node_id"] == "readme.html exposed"
+    assert board.finding_detail(0) == ("LOW · readme.html exposed\n"
+                                       "component: unknown\n"
+                                       "node: readme.html exposed")
+    assert board.finding_detail(99) == ""
     assert ScanBoard().findings() == []
+    assert ScanBoard().finding_detail(0) == ""
 
 
 # ---------------------------------------------------------------- log lines
@@ -566,6 +602,274 @@ def test_flow_app_renders_a_recorded_run(tmp_path):
     asyncio.run(scenario())
 
 
+def _finding_event(**data):
+    """The operator's unreadable-row finding: machine fields plus a human label."""
+    payload = {"component": "wordpress", "name": "unrated:wordpress:1",
+               "detail": "WordPress 6.4.2 outdated", "severity": "medium",
+               "basis": "version header", "score": 42}
+    payload.update(data)
+    return _event("finding", "passive", seq=50, **payload)
+
+
+def test_flow_app_findings_rows_show_severity_and_human_detail(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())
+    app = FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                  command="wpbuddy flow", target="acme.test")
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await _settle(app)
+            app.apply_event(_finding_event())
+            await pilot.pause()
+            rows = [text for item in app.query_one("#findings").children
+                    for text in _item_texts(item)]
+            assert "MEDIUM · WordPress 6.4.2 outdated (score 42) · unrated:wordpress:1" \
+                in rows, rows
+
+    asyncio.run(scenario())
+
+
+def test_flow_app_credential_finding_row_and_detail_without_severity(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+
+    events = tmp_path / "events.jsonl"
+    bare = [event for event in _script() if event["type"] != "finding"]
+    _write_events(events, bare)
+    app = FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                  command="wpbuddy flow", target="acme.test")
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await _settle(app)
+            app.apply_event(_event("finding", "active", seq=50, name="credential:1",
+                                   detail="working credential for admin"))
+            await pilot.pause()
+            rows = [text for item in app.query_one("#findings").children
+                    for text in _item_texts(item)]
+            assert "UNRATED · working credential for admin · credential:1" in rows, rows
+            detail = str(app.query_one("#finding-detail").render())  # auto-selected
+            assert "UNRATED · working credential for admin" in detail
+            assert "component: unknown" in detail
+            assert "node: credential:1" in detail
+
+    asyncio.run(scenario())
+
+
+def test_flow_app_finding_highlight_fills_finding_detail(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())
+    app = FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                  command="wpbuddy flow", target="acme.test")
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await _settle(app)
+            app.apply_event(_finding_event())
+            await pilot.pause()
+            view = app.query_one("#findings")
+            view.index = len(view.children) - 1  # highlight the new finding
+            await pilot.pause()
+            detail = str(app.query_one("#finding-detail").render())
+            assert "MEDIUM" in detail
+            assert "WordPress 6.4.2 outdated" in detail
+            assert "version header" in detail
+            assert "unrated:wordpress:1" in detail
+
+    asyncio.run(scenario())
+
+
+def test_finding_detail_survives_a_phase_event(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())
+    app = FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                  command="wpbuddy flow", target="acme.test")
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await _settle(app)
+            app.apply_event(_finding_event())
+            await pilot.pause()
+            view = app.query_one("#findings")
+            view.index = len(view.children) - 1
+            await pilot.pause()
+            assert "WordPress 6.4.2 outdated" in \
+                str(app.query_one("#finding-detail").render())
+            rail = app.query_one("#rail")
+            rail_before = [id(child) for child in rail.children]
+            app.apply_event(_event("phase-started", "active", seq=60))
+            app.apply_event(_event("phase-finished", "active", seq=61))
+            await pilot.pause()  # a rail rebuild must not touch the finding detail
+            assert [id(child) for child in rail.children] != rail_before  # it rebuilt
+            rows = [text for item in rail.children for text in _item_texts(item)]
+            assert any(row.startswith("✓ active") for row in rows), rows  # glyph moved
+            assert "WordPress 6.4.2 outdated" in \
+                str(app.query_one("#finding-detail").render())
+
+    asyncio.run(scenario())
+
+
+def test_observatory_notify_appears_in_the_notices_pane(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())
+    app = FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                  command="wpbuddy flow", target="acme.test")
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await _settle(app)
+            app.notify("hello operator", markup=False)
+            await pilot.pause()
+            lines = [line.text for line in app.query_one("#notices").lines]
+            assert any("hello operator" in line for line in lines), lines
+            assert any("hello operator" in note.message  # the native toast too
+                       for note in app._notifications)
+
+    asyncio.run(scenario())
+
+
+def test_launcher_notify_is_recorded_and_shown_after_mount(tmp_path, monkeypatch):
+    from wpbuddy import config
+    from wpbuddy.tui import app as flow
+
+    monkeypatch.setattr(config, "RUNS_DIR", tmp_path / "runs-root")
+    run = tmp_path / "wpbuddy-audit" / "acme.test" / "runs" / "20261104-120000-abc"
+    _write_events(run / "events.jsonl", _script())
+    app = flow.FlowApp(launcher=True, board=ScanBoard())
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            app.notify("target must be a URL", markup=False)  # no notices pane yet
+            await pilot.pause()
+            assert any("target must be a URL" in note.message  # the toast showed
+                       for note in app._notifications)
+            app.open_run(run / "events.jsonl")
+            await _settle(app)
+            lines = [line.text for line in app.screen.query_one("#notices").lines]
+            assert any("target must be a URL" in line for line in lines), lines
+
+    asyncio.run(scenario())
+
+
+def test_copy_error_binding_puts_message_and_traceback_on_the_clipboard(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+
+    traceback_text = (
+        'Traceback (most recent call last):\n'
+        '  File "/repo/wpbuddy/passive/posture.py", line 87, in _tls_facts\n'
+        "    issuer = ', '.join(certs[0]['issuer'])\n"
+        "ValueError: boom\n"
+    )
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script() + [
+        _event("phase-failed", "passive", seq=50,
+               message="ValueError: boom", traceback=traceback_text),
+    ])
+    app = FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                  command="wpbuddy flow", target="acme.test")
+    copied = []
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await _settle(app)
+            app.copy_to_clipboard = copied.append
+            await pilot.press("e")
+            await pilot.pause()
+            assert copied, "the `e` binding did not copy the error"
+            assert "ValueError: boom" in copied[0]
+            assert "_tls_facts" in copied[0]
+            assert not copied[0].endswith("\n")  # the payload has no trailing blank
+
+    asyncio.run(scenario())
+
+
+def test_copy_error_with_nothing_failed_only_notifies(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())  # every phase finished or skipped: no failure
+    app = FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                  command="wpbuddy flow", target="acme.test")
+    copied = []
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await _settle(app)
+            app.copy_to_clipboard = copied.append
+            await pilot.press("e")
+            await pilot.pause()
+            assert copied == []  # nothing failed: the clipboard is untouched
+            assert any("no error to copy" in note.message
+                       for note in app._notifications)
+
+    asyncio.run(scenario())
+
+
+def test_observatory_panes_fit_an_80_by_24_terminal(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())
+    app = FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                  command="wpbuddy flow", target="acme.test")
+
+    async def scenario():
+        async with app.run_test(size=(80, 24)) as pilot:
+            await _settle(app)
+            app.apply_event(_finding_event())  # a filled #finding-detail is tallest
+            await pilot.pause()
+            log_top = app.query_one("#log").region.y
+            assert app.query_one("#findings").region.bottom <= log_top
+            assert app.query_one("#finding-detail").region.bottom <= log_top
+
+    asyncio.run(scenario())
+
+
+def test_about_overlay_is_readable_at_80_by_24(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())
+    app = FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                  command="wpbuddy flow", target="acme.test")
+
+    async def scenario():
+        async with app.run_test(size=(80, 24)) as pilot:
+            await _settle(app)
+            about = app.query_one("#about")
+            assert about.display is False  # hidden until `?`
+            await pilot.press("question_mark")
+            await pilot.pause()
+            screen = app.screen.region
+            region = about.region
+            assert about.display is True
+            assert region.y >= screen.y and region.bottom <= screen.bottom, region
+            assert region.height - 2 >= 14  # every ABOUT_TEXT row fits inside
+            # what is actually PAINTED (the screenshot), not Static.render()'s
+            # unclipped renderable - a clipped-away hint must fail this. The
+            # SVG splits one screen row into several <text> segments, so they
+            # are joined in document order, exactly as painted; &#160; is the
+            # SVG's non-breaking space for a plain one.
+            segments = re.findall(r"<text[^>]*>(.*?)</text>",
+                                  app.export_screenshot(), re.S)
+            painted = html.unescape("".join(segments)).replace("\xa0", " ")
+            assert "e copy error" in painted  # the full keys line survived the box
+            assert "single-screen" in painted  # the description too
+            await pilot.press("question_mark")
+            await pilot.pause()
+            assert about.display is False  # `?` hides the overlay again
+
+    asyncio.run(scenario())
+
+
 def test_flow_app_bindings_copy_about_and_quit(tmp_path):
     from wpbuddy.tui.app import FlowApp
 
@@ -978,6 +1282,36 @@ def test_flow_app_http_response_does_not_rebuild_the_rail(tmp_path):
 
 
 # --------------------------------------------------------------- launcher
+
+def test_launcher_shows_the_full_logo():
+    from wpbuddy.tui.app import FlowApp
+    from wpbuddy.tui.art import LOGO
+
+    app = FlowApp(launcher=True, board=ScanBoard())
+
+    async def scenario():
+        async with app.run_test():
+            header = str(app.query_one("#header").render())
+            for line in LOGO.splitlines():
+                assert line in header, line
+
+    asyncio.run(scenario())
+
+
+def test_launcher_fits_an_80_by_24_terminal():
+    from wpbuddy.tui.app import FlowApp
+
+    app = FlowApp(launcher=True, board=ScanBoard())
+
+    async def scenario():
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            screen_bottom = app.screen.region.bottom
+            assert app.query_one("#cycles").region.bottom <= screen_bottom
+            assert app.query_one("#launch").region.bottom <= screen_bottom
+
+    asyncio.run(scenario())
+
 
 def test_flow_app_launcher_mounts_by_default():
     from wpbuddy.tui.app import FlowApp, LauncherScreen
