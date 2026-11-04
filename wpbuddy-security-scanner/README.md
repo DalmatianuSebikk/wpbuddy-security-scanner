@@ -8,11 +8,15 @@ and matches known vulnerabilities for the WordPress core version and for plugins
 users, probes XML-RPC, tests weak credentials, and can **gather a component's source
 code and audit it locally** to find live issues that no database knows about yet.
 
-The 0.4.0 release turned the flat scanner into a small toolkit: `wpbuddy scan`,
-`wpbuddy exploit`, `wpbuddy db`, `wpbuddy report diff` and the live TUI **flow**
-observatory - with the hard-gated engagement model (authorization, budgets,
-allowed effects) on top. The flat `python main.py --target ...` form still works
-and is equivalent to `wpbuddy scan`.
+The 0.4.0 release turned the flat scanner into a small toolkit: `wpbuddy scan`
+runs the passive + active + code-audit scan, `wpbuddy exploit` plan-first
+exploitation engine, `wpbuddy post cleanup --run ID` cleanup-log replay, and
+`wpbuddy db status|update` manages the local vulnerability cache, `wpbuddy report diff`
+compares two scan graphs, `wpbuddy lab` lab matrix, and the live TUI **flow**
+observatory (`wpbuddy flow`, with `wpbuddy tui` and `wpbuddy explain` as
+aliases) watches scans live or replaying recorded runs - with the hard-gated
+engagement model (authorization, budgets, allowed effects) on top. The flat
+`python main.py --target ...` form still works and is equivalent to `wpbuddy scan`.
 
 ## Disclaimer
 - this project is related to Website Security and is not a tool for malicious activities.
@@ -217,6 +221,20 @@ sitemap, REST API, `?author=` redirects, wp-login.php and xmlrpc.php - enough to
 exercise the whole pipeline without touching a real target.
 
 ## Changelog
+
+### Unreleased
+
+**Fixed**
+- TLS posture check no longer crashes on HTTPS targets: `getpeercert()` issuer
+  RDNs are joined by their values (`US, Let's Encrypt, R11`) instead of raising
+  `TypeError` and aborting the whole scan.
+
+**Added**
+- TUI operator visibility: findings rows read `SEVERITY · human detail (+score)`
+  with a dedicated context pane (basis, component, node id), a persistent
+  notices pane that keeps every notification on screen, the full ASCII logo on
+  the launcher, phase-failure tracebacks with an `e` binding that copies the
+  last error to the clipboard, and a readable `?` about overlay at 80x24.
 
 ### v0.4.0
 
