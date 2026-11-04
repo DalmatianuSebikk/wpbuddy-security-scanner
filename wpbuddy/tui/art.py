@@ -1,17 +1,24 @@
 """Shared artwork for WpBuddy's terminal surfaces.
 
-`LOGO` is the hand-drawn figlet-style wordmark (pure ASCII, every line
-<= 78 columns) and `CLI_BANNER` pairs it with the scanner intro and the
-authorization disclaimer. The CLI's argparse description and the TUI
-splash both render from here so the surfaces never drift apart.
+`LOGO` is the wordmark (pure ASCII, every line <= 78 columns) and
+`CLI_BANNER` pairs it with the scanner intro and the authorization
+disclaimer. The CLI's argparse description and the TUI splash both render
+from here so the surfaces never drift apart.
+
+Logo provenance: generated with pyfiglet (figlet) in the `doom` font -
+regenerate with:
+    python -c "import pyfiglet; print(pyfiglet.figlet_format('WpBuddy', font='doom'))"
 """
 
-LOGO = r"""__        __                 ____                  _         _
-\ \      / /        _ __    | __ )    _   _       | |       | |
- \ \ /\ / /        | '_ \   |  _ \   | | | |  |   | |   |   | |   \   | |
-  \ V  V /         | |_) |  | |_) |  | |_| |  |   | |   |   | |    \  | |
-   \_/\_/          | .__/   |____/    \___/   |___|_|   |___|_|     \ | |
-                   |_|                                               \|_|"""
+LOGO = r""" _    _      ______           _     _
+| |  | |     | ___ \         | |   | |
+| |  | |_ __ | |_/ /_   _  __| | __| |_   _
+| |/\| | '_ \| ___ \ | | |/ _` |/ _` | | | |
+\  /\  / |_) | |_/ / |_| | (_| | (_| | |_| |
+ \/  \/| .__/\____/ \__,_|\__,_|\__,_|\__, |
+       | |                             __/ |
+       |_|                            |___/
+"""
 
 CLI_BANNER = LOGO + """
 
