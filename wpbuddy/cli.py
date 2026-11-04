@@ -5,6 +5,7 @@ import json
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from . import __version__, confidence, config, httpclient
@@ -148,6 +149,8 @@ Examples:
     parser.add_argument("--no-run-log", action="store_true",
                         help="Do not write the append-only run log "
                              "(wpbuddy-audit/<host>/runs/<run_id>/events.jsonl)")
+    parser.add_argument("--runs-dir", metavar="DIR",
+                        help="where runs are recorded (default ~/.wpbuddy/previous-runs)")
     parser.add_argument("--authorization", metavar="TEXT",
                         help="Engagement scope (roadmap 2.3/9): text proving authorization for "
                              "this target (contract id, ticket, owner name); stored with the run")
@@ -319,7 +322,6 @@ def _cmd_report(argv):
     diff.add_argument("current", help="the later --json graph")
     args = parser.parse_args(argv)
 
-    from pathlib import Path
     try:
         previous = json.loads(Path(args.previous).read_text(encoding="utf-8"))
         current = json.loads(Path(args.current).read_text(encoding="utf-8"))
@@ -463,6 +465,11 @@ def _cmd_scan(argv=None):
     report.paragraph(f"Scanned with WpBuddy {__version__} on a target supplied by the operator. "
                      f"Findings are leads for an authorized security assessment.")
     model = confidence.ScanModel()
+
+    # Stable runs root (--runs-dir): resolve before the engine wires its
+    # RunStore; the config default (~/.wpbuddy/previous-runs) applies otherwise.
+    if args.runs_dir:
+        config.RUNS_DIR = Path(args.runs_dir).expanduser()
 
     from .engine.events import EventBus
     from .engine.phases import default_graph

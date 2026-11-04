@@ -3522,3 +3522,47 @@ def test_covert_curl_cffi_backend(mock):
     resp = httpclient.get(f"{mock}wpbuddy-echo")
     assert resp is not None and resp.status_code == 200
     assert resp.json()["ua"].startswith("Mozilla/5.0 (X11; Linux")
+
+
+# -------------------------------------------------- run log (--runs-dir)
+
+def _offline_vulndb(monkeypatch):
+    """Keep the vulnerability API out of these end-to-end scans."""
+    monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: None)
+
+
+def test_cli_runs_dir_records_run_under_custom_root(mock, tmp_path, monkeypatch):
+    """scan --runs-dir X records the run under X/<host>/runs/, not the CWD."""
+    from wpbuddy import cli
+    _offline_vulndb(monkeypatch)
+    workdir = tmp_path / "workdir"
+    runs_root = tmp_path / "stable-runs"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--target", mock, "--pluginList", "", "--audit-code", "off",
+                  "--runs-dir", str(runs_root), "--output", str(tmp_path / "report")])
+    assert exc.value.code == 0
+
+    runs = list(runs_root.rglob("events.jsonl"))
+    assert len(runs) == 1
+    meta = json.loads((runs[0].parent / "meta.json").read_text())
+    assert meta["status"] == "ok"
+    assert not list(workdir.rglob("events.jsonl"))  # CWD stays clean
+    assert (tmp_path / "report.md").is_file()       # report unchanged
+
+
+def test_cli_unwritable_runs_dir_still_completes(mock, tmp_path, monkeypatch, capsys):
+    """An unusable runs root must not fail the scan: the store degrades."""
+    from wpbuddy import cli
+    _offline_vulndb(monkeypatch)
+    blocker = tmp_path / "blocked-runs"
+    blocker.write_text("not a directory")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--target", mock, "--pluginList", "", "--audit-code", "off",
+                  "--runs-dir", str(blocker), "--output", str(tmp_path / "report")])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "Traceback" not in out
+    assert (tmp_path / "report.md").is_file()

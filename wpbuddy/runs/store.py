@@ -1,4 +1,8 @@
-"""Append-only run log: `wpbuddy-audit/<host>/runs/<run_id>/`.
+"""Append-only run log: `<runs-root>/<host>/runs/<run_id>/`.
+
+The runs root is the stable `~/.wpbuddy/previous-runs` (config.RUNS_DIR);
+an explicit base (or --runs-dir) wins, and RUNS_DIR = None restores the
+legacy CWD-relative `wpbuddy-audit/`.
 
 Each run gets `meta.json` (what/when/argv) and `events.jsonl` (one event per
 line, monotonic `seq`). The log is written by a bus subscriber and is never
@@ -14,12 +18,19 @@ import secrets
 from datetime import datetime
 from pathlib import Path
 
-from .. import __version__
+from .. import __version__, config
 from ..engine.events import Event
 
 
 def audit_root(base=None):
-    return Path(base or "wpbuddy-audit")
+    """Explicit base wins, then config.RUNS_DIR (`~` expanded; None = the
+    legacy CWD-relative wpbuddy-audit/)."""
+    if base:
+        return Path(base)
+    runs_dir = getattr(config, "RUNS_DIR", None)
+    if runs_dir is not None:
+        return Path(runs_dir).expanduser()
+    return Path("wpbuddy-audit")
 
 
 class RunStore:

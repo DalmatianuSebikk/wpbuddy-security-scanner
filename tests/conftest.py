@@ -34,6 +34,11 @@ def _isolate_scan_state(tmp_path):
     # ~/.wpbuddy cache from a test (F-1)
     config.VULNDB_CACHE = tmp_path / "vulndb-test.sqlite3"
 
+    # run-log layout: pin the legacy CWD-relative wpbuddy-audit/ root so no
+    # test ever writes into the developer's real ~/.wpbuddy/previous-runs
+    # (the production default is restored with the config snapshot below)
+    config.RUNS_DIR = None
+
     files.reset()
     waf.reset()
     errorpages.reset()

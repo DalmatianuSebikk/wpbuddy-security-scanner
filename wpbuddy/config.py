@@ -37,6 +37,12 @@ TARGET_HOST = None
 VULNDB_CACHE = None
 OFFLINE = False
 
+# Append-only run log: one stable place for every recorded run (the same
+# ~/.wpbuddy home as the vulndb cache). Explicit --runs-dir / a RunStore
+# base override this; None restores the legacy CWD-relative wpbuddy-audit/
+# layout (tests pin it via conftest).
+RUNS_DIR = Path.home() / ".wpbuddy" / "previous-runs"
+
 # Authenticated mode (F-3): operator-supplied credentials, attached to
 # requests ONLY for the scan target host (never to the data APIs).
 AUTH_COOKIE = None     # raw Cookie header value (--cookie)

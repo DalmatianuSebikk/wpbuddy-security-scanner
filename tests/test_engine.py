@@ -6,18 +6,19 @@ isolates broken subscribers, and a run can be recorded/replayed.
 """
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from mockwp_server import start_mock_wp
 
-from wpbuddy import cli, confidence, httpclient
+from wpbuddy import cli, confidence, config, httpclient
 from wpbuddy.engine import events as scan_events
 from wpbuddy.engine.events import Event, EventBus, EventType
 from wpbuddy.engine.phases import PhaseGraph, PhaseSpec, Precondition, default_graph
 from wpbuddy.engine.run import HANDLERS, ScanContext, ScanEngine
 from wpbuddy.report import Report
-from wpbuddy.runs.store import RunStore, iter_events
+from wpbuddy.runs.store import RunStore, audit_root, iter_events
 
 
 @pytest.fixture(autouse=True)
@@ -172,6 +173,46 @@ def test_run_store_survives_unwritable_base(tmp_path):
     assert store.create("https://example.com/") is None
     store.append(Event(EventType.RUN_STARTED))  # must be a no-op
     assert list(store.events()) == []
+
+
+# ------------------------------------------------ stable runs root (config)
+
+def test_run_store_honors_config_runs_dir(tmp_path):
+    """config.RUNS_DIR moves the run-log root without an explicit base."""
+    runs_root = tmp_path / "previous-runs"
+    config.RUNS_DIR = runs_root
+    store = RunStore("example.com")
+    run_id = store.create("https://example.com/")
+    assert run_id
+    assert (runs_root / "example.com" / "runs" / run_id / "meta.json").is_file()
+
+
+def test_run_store_legacy_root_when_runs_dir_none(tmp_path, monkeypatch):
+    """RUNS_DIR = None is the legacy switch: CWD-relative wpbuddy-audit/."""
+    monkeypatch.setattr(config, "RUNS_DIR", None)
+    monkeypatch.chdir(tmp_path)
+    store = RunStore("example.com")
+    run_id = store.create("https://example.com/")
+    assert run_id
+    assert (tmp_path / "wpbuddy-audit" / "example.com" / "runs"
+            / run_id / "meta.json").is_file()
+
+
+def test_run_store_expands_home_in_runs_dir(monkeypatch):
+    """A '~'-leading RUNS_DIR resolves against the real home directory."""
+    monkeypatch.setattr(config, "RUNS_DIR", "~/wpbuddy-previous-runs-itest")
+    root = audit_root()
+    assert root == Path.home() / "wpbuddy-previous-runs-itest"
+    assert RunStore("example.com").base == root
+
+
+def test_config_default_runs_dir_is_stable_home_root():
+    """The import-time default is the stable home root. conftest pins
+    RUNS_DIR = None for isolation, so re-execute config.py to observe the
+    shipped value; the fixture's snapshot/restore repairs the module after."""
+    import importlib
+    fresh = importlib.reload(config)
+    assert fresh.RUNS_DIR == Path.home() / ".wpbuddy" / "previous-runs"
 
 
 # ------------------------------------------------------------------- CLI
