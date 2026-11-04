@@ -8,6 +8,12 @@ and matches known vulnerabilities for the WordPress core version and for plugins
 users, probes XML-RPC, tests weak credentials, and can **gather a component's source
 code and audit it locally** to find live issues that no database knows about yet.
 
+The 0.4.0 release turned the flat scanner into a small toolkit: `wpbuddy scan`,
+`wpbuddy exploit`, `wpbuddy db`, `wpbuddy report diff` and the live TUI **flow**
+observatory - with the hard-gated engagement model (authorization, budgets,
+allowed effects) on top. The flat `python main.py --target ...` form still works
+and is equivalent to `wpbuddy scan`.
+
 ## Disclaimer
 - this project is related to Website Security and is not a tool for malicious activities.
 - you shall not misuse this tool to gain unauthorized access.
@@ -36,6 +42,12 @@ python main.py --target https://example.com/ --json                          # +
 python main.py --target https://example.com/ --source-dir ~/licensed-zips    # + audit commercial/custom code you own
 python main.py --target https://example.com/ --profile deep                  # + aggressive read-only discovery
 python main.py --target https://example.com/ --offline                       # no internet: scan from the cached vuln DB
+```
+
+```bash
+wpbuddy scan --target https://example.com/     # same engine via the subcommand form
+wpbuddy flow                                   # live TUI observatory / run launcher
+wpbuddy db update                              # refresh the local vulnerability DB cache
 ```
 
 Full options: `python main.py --help` (flat mode), or per subcommand: `wpbuddy scan|exploit|db|report|flow --help`
