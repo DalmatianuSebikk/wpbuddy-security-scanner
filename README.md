@@ -49,6 +49,17 @@ The report is written as Markdown (default `outputScan.md`); gathered sources an
 evidence land in `wpbuddy-audit/<host>/` for manual review. With `--json`, the scan also
 produces `<output>.json` - a knowledge graph of the site (see below).
 
+## Flow observatory (TUI)
+
+The whole scan flow - phases, checks, findings, event log - is visible on one screen,
+live or replayed from a recorded run:
+
+```bash
+pip install 'wpbuddy[tui]'                        # optional extra (Textual)
+wpbuddy flow --target https://example.com/        # watch a live scan
+wpbuddy flow --run wpbuddy-audit/<host>/runs/<id> # replay a recorded run
+```
+
 ## Confidence model
 
 Every finding is only as good as its weakest evidence link, so nothing is reported as
@@ -153,7 +164,7 @@ tests/                  mock WordPress site + pytest suite (runs offline)
 
 ### Inspecting a run
 
-The CLI and a future TUI share one phase graph (`wpbuddy/engine/phases.py`).
+The CLI and the TUI share one phase graph (`wpbuddy/engine/phases.py`).
 Every run appends typed events to `wpbuddy-audit/<host>/runs/<run_id>/events.jsonl`
 (disable with `--no-run-log`) and records `meta.json` next to it.
 

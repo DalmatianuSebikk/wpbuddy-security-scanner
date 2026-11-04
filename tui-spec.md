@@ -1,12 +1,15 @@
 # WpBuddy TUI — flow observatory specification
 
-Status: **engine scaffolding done; Textual app deferred.** The shared phase graph
+Status: **first shell shipped.** `wpbuddy flow` (aliases `tui`, `explain`; needs the
+optional `[tui]` extra) is a single screen with **no modes**: a live scan and a recorded
+run (`--run wpbuddy-audit/<host>/runs/<id>`) differ only in the event source. Shipped
+panes: banner/top bar, phase rail with per-phase detail, findings list, append-only event
+log and an about pane. The no-modes decision **supersedes the "Four modes" section** for
+the shipped shell. Later slices — explain pauses/breakpoints, lineage, confidence ledger
+and evidence panes — remain deferred per the delivery order below. The shared phase graph
 (`wpbuddy/engine/phases.py`), typed events (`wpbuddy/engine/events.py`), scan engine
 (`wpbuddy/engine/run.py`, `--explain`) and append-only run store
-(`wpbuddy/runs/store.py`) exist and back the CLI. The TUI itself moves to the end of the
-exploitation roadmap: the read-only/observe slice is still correct, but its most valuable
-screens (exploit plan, execute, artifacts, cleanup) need actions that do not exist yet.
-Until then, the CLI plus `events.jsonl` is the interface.
+(`wpbuddy/runs/store.py`) still back it, and the plain CLI stays canonical.
 
 Goal: a TUI that makes the **flow** of a scan understandable. It is a pipeline observatory,
 not a miniature web dashboard. Every phase exposes its inputs, checks, outputs, skip reasons
