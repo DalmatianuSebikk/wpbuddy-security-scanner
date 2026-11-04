@@ -703,6 +703,114 @@ def test_spawn_and_locate_tolerates_a_missing_host(tmp_path, monkeypatch):
     assert proc.poll() == 0
 
 
+# ------------------------------------------------- runs-root discovery
+
+def test_run_flow_finds_runs_under_the_stable_runs_root(tmp_path, monkeypatch):
+    from wpbuddy import config
+    from wpbuddy.tui import app as flow
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()  # CWD: no wpbuddy-audit anywhere
+    monkeypatch.chdir(elsewhere)
+    runs = tmp_path / "runs-root"
+    monkeypatch.setattr(config, "RUNS_DIR", runs)
+    run = runs / "acme.test" / "runs" / "20261104-120000-abc"
+    _write_events(run / "events.jsonl", _script())
+    _FakeApp.instances.clear()
+    monkeypatch.setattr(flow, "FlowApp", _FakeApp)
+
+    assert flow.runs_root() == runs  # honors config.RUNS_DIR like the store
+    assert flow.run_flow([]) == 0
+    app = _FakeApp.instances[-1]
+    assert "acme.test" in app.command  # found under the root, CWD irrelevant
+    assert app.board.stats()["status"] == "completed"
+
+
+def test_run_flow_prefers_the_runs_root_over_legacy_cwd_runs(tmp_path, monkeypatch):
+    from wpbuddy import config
+    from wpbuddy.tui import app as flow
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config, "RUNS_DIR", tmp_path / "runs-root")
+    root_run = tmp_path / "runs-root" / "new.test" / "runs" / "run-new"
+    legacy_run = tmp_path / "wpbuddy-audit" / "old.test" / "runs" / "run-old"
+    _write_events(root_run / "events.jsonl", _script())
+    _write_events(legacy_run / "events.jsonl", _script())
+    os.utime(root_run / "events.jsonl", (3, 3))
+    os.utime(legacy_run / "events.jsonl", (2, 2))
+    _FakeApp.instances.clear()
+    monkeypatch.setattr(flow, "FlowApp", _FakeApp)
+
+    assert flow.run_flow([]) == 0
+    command = _FakeApp.instances[-1].command
+    assert "new.test" in command  # the runs root is searched first
+    assert "old.test" not in command
+
+
+def test_run_flow_falls_back_to_legacy_cwd_runs_when_root_empty(tmp_path, monkeypatch):
+    from wpbuddy import config
+    from wpbuddy.tui import app as flow
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config, "RUNS_DIR", tmp_path / "empty-root")
+    (tmp_path / "empty-root").mkdir(exist_ok=True)  # root present, no runs yet
+    legacy = tmp_path / "wpbuddy-audit" / "old.test" / "runs" / "20260101-000000-aaa"
+    _write_events(legacy / "events.jsonl", _script())
+    _FakeApp.instances.clear()
+    monkeypatch.setattr(flow, "FlowApp", _FakeApp)
+
+    assert flow.run_flow([]) == 0  # pre-feature runs still open
+    assert "old.test" in _FakeApp.instances[-1].command
+
+
+def test_run_flow_spawns_and_tails_under_the_runs_root(tmp_path, monkeypatch):
+    from wpbuddy import config
+    from wpbuddy.tui import app as flow
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    runs = tmp_path / "runs-root"
+    monkeypatch.setattr(config, "RUNS_DIR", runs)
+    events = runs / "acme.test" / "runs" / "20261104-120000-abc" / "events.jsonl"
+
+    def fake_popen(cmd, **kwargs):
+        return _FakePopen(cmd, events_path=events, events=_script(), **kwargs)
+
+    monkeypatch.setattr(flow.subprocess, "Popen", fake_popen)
+    _FakeApp.instances.clear()
+    _FakePopen.spawns.clear()
+    monkeypatch.setattr(flow, "FlowApp", _FakeApp)
+
+    assert flow.run_flow(["--target", "https://acme.test/"]) == 0
+    app = _FakeApp.instances[-1]
+    assert app.board.stats()["status"] == "completed"  # tailed the run under the root
+
+
+def test_run_flow_watches_the_passthrough_runs_dir_for_a_live_scan(tmp_path, monkeypatch):
+    from wpbuddy import config
+    from wpbuddy.tui import app as flow
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config, "RUNS_DIR", tmp_path / "default-root")
+    custom = tmp_path / "custom-root"
+    events = custom / "acme.test" / "runs" / "20261104-120000-abc" / "events.jsonl"
+
+    def fake_popen(cmd, **kwargs):
+        assert "--runs-dir" in cmd  # forwarded to the scan subprocess verbatim
+        return _FakePopen(cmd, events_path=events, events=_script(), **kwargs)
+
+    monkeypatch.setattr(flow.subprocess, "Popen", fake_popen)
+    _FakeApp.instances.clear()
+    _FakePopen.spawns.clear()
+    monkeypatch.setattr(flow, "FlowApp", _FakeApp)
+
+    assert flow.run_flow(["--target", "https://acme.test/",
+                          "--runs-dir", str(custom)]) == 0
+    # the watcher followed the child's --runs-dir, not config.RUNS_DIR
+    assert _FakeApp.instances[-1].board.stats()["status"] == "completed"
+
+
 # --------------------------------------------------------- final fix wave
 
 class _CrashingApp(_FakeApp):

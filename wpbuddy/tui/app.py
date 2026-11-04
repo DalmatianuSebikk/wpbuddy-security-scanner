@@ -29,6 +29,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from ..runs.store import audit_root
 from .art import LOGO
 from .render import ScanBoard
 from .tail import follow, replay
@@ -280,7 +281,7 @@ def run_flow(argv: list[str]) -> int:
             print(f"target must be a URL with a host: {args.target}")
             return 2
     else:
-        events_path = _newest_events_file(Path("wpbuddy-audit"))
+        events_path = _newest_run_events()
         if events_path is None:
             print("no recorded runs found - pass --target or --run")
             return 2
@@ -301,7 +302,10 @@ def run_flow(argv: list[str]) -> int:
         spawn_cmd = [sys.executable, "-m", "wpbuddy.cli", "scan",
                      "--target", args.target, *passthrough]
         command = " ".join(shlex.quote(part) for part in spawn_cmd)
-        events_path, proc = _spawn_and_locate(spawn_cmd, host)
+        # the child resolves --runs-dir itself (config.RUNS_DIR in its own
+        # process); the watcher must follow the SAME root it will write to
+        root = audit_root(_flag_value(passthrough, "--runs-dir"))
+        events_path, proc = _spawn_and_locate(spawn_cmd, host, root)
         if events_path is None:
             if proc.poll() is not None:
                 print("the scan ended without writing a run log (--no-run-log or --plan?)")
@@ -346,23 +350,44 @@ def _resolve_run_path(raw) -> Path | None:
     return None
 
 
+def runs_root() -> Path:
+    """Where scans record runs: the store's own audit root, nothing re-derived
+    (explicit base wins, then config.RUNS_DIR, else the legacy CWD root)."""
+    return audit_root()
+
+
 def _newest_events_file(root: Path) -> Path | None:
     """The newest events.jsonl across every host's runs under the audit root."""
     candidates = [p for p in root.glob("*/runs/*/events.jsonl") if p.is_file()]
     return max(candidates, key=lambda p: p.stat().st_mtime_ns) if candidates else None
 
 
-def _spawn_and_locate(spawn_cmd, host):
+def _newest_run_events() -> Path | None:
+    """Newest run under the runs root first, then the legacy CWD root.
+
+    The legacy fallback keeps runs recorded before the stable root existed
+    openable; when the configured root IS the legacy root it is searched once.
+    """
+    root = runs_root()
+    newest = _newest_events_file(root)
+    legacy = Path("wpbuddy-audit")
+    if newest is None and root != legacy:
+        newest = _newest_events_file(legacy)
+    return newest
+
+
+def _spawn_and_locate(spawn_cmd, host, root=None):
     """Start the scan subprocess, then wait for its NEW run log to appear."""
-    runs_root = Path("wpbuddy-audit") / (host or "target") / "runs"
-    known = {str(p) for p in runs_root.glob("*/events.jsonl")}
+    base = root if root is not None else runs_root()
+    host_runs = base / (host or "target") / "runs"
+    known = {str(p) for p in host_runs.glob("*/events.jsonl")}
     # POSIX only (macOS/Linux are the targets): the child starts its own
     # session, so it leads a process group a quit-time SIGINT can reach
     # wholesale - the scanner and anything it spawned.
     proc = subprocess.Popen(spawn_cmd, start_new_session=True)
     deadline = time.monotonic() + _RUN_APPEAR_TIMEOUT
     while True:
-        candidates = [p for p in runs_root.glob("*/events.jsonl")
+        candidates = [p for p in host_runs.glob("*/events.jsonl")
                       if p.is_file() and str(p) not in known]
         if candidates:
             return max(candidates, key=lambda p: p.stat().st_mtime_ns), proc
@@ -454,11 +479,16 @@ def _target_label(events_path: Path, meta: dict | None = None) -> str:
     return "recorded run"
 
 
-def _profile_from(argv: list[str]) -> str | None:
-    """The --profile the operator passed through to the scan, if any."""
+def _flag_value(argv: list[str], flag: str) -> str | None:
+    """The value of `flag`/`flag=value` in an argv list, if present."""
     for index, arg in enumerate(argv):
-        if arg == "--profile" and index + 1 < len(argv):
+        if arg == flag and index + 1 < len(argv):
             return argv[index + 1]
-        if arg.startswith("--profile="):
+        if arg.startswith(flag + "="):
             return arg.split("=", 1)[1]
     return None
+
+
+def _profile_from(argv: list[str]) -> str | None:
+    """The --profile the operator passed through to the scan, if any."""
+    return _flag_value(argv, "--profile")
