@@ -156,6 +156,10 @@ def _summary(event_type, data):
         return "; ".join(str(r) for r in (data.get("reasons") or [])) or "skipped"
     if event_type == "phase-failed":
         return str(data.get("message") or "failed")
+    if event_type == "check-started":
+        return f"check {data.get('subphase') or '?'} started"
+    if event_type == "check-finished":
+        return f"check {data.get('subphase') or '?'} done"
     if event_type == "http-request":
         return f"{data.get('method') or 'GET'} {data.get('url') or ''}".strip()
     if event_type == "http-response":

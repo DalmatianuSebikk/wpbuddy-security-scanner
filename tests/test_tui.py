@@ -305,12 +305,13 @@ class _FakePopen:
 
     spawns = []
 
-    def __init__(self, cmd, events_path=None, events=None, running=False, **kwargs):
+    def __init__(self, cmd, events_path=None, events=None, running=False,
+                 exit_code=0, **kwargs):
         self.cmd = list(cmd)
         self.kwargs = kwargs
         self.pid = 4242
         self.signals = []
-        self.returncode = None if running else 0
+        self.returncode = None if running else exit_code
         if events_path is not None:
             _write_events(events_path, events or _script())
         _FakePopen.spawns.append(self)
@@ -658,6 +659,7 @@ def test_flow_app_log_pane_caps_its_window_without_dropping_new_lines(tmp_path, 
     async def scenario():
         async with app.run_test() as pilot:
             await _settle(app)
+            assert app.query_one("#log").max_lines == 5  # the pane bounds retention
             assert app.log_lines_rendered == len(_script())  # everything rendered
             for i in range(3):  # past the window, new events must still land
                 app.apply_event(_event("http-response", "passive", seq=100 + i,
@@ -699,3 +701,145 @@ def test_spawn_and_locate_tolerates_a_missing_host(tmp_path, monkeypatch):
     events_path, proc = flow._spawn_and_locate(["echo"], None)
     assert events_path is None  # defensive: a None host must not raise
     assert proc.poll() == 0
+
+
+# --------------------------------------------------------- final fix wave
+
+class _CrashingApp(_FakeApp):
+    """FlowApp double whose run() dies the way an abnormal TUI death would."""
+
+    def run(self):
+        raise RuntimeError("textual died mid-run")
+
+
+def test_check_events_summarize_their_subphase():
+    board = ScanBoard()
+    board.apply(_event("check-started", "report", subphase="write"))
+    board.apply(_event("check-finished", "report", subphase="write"))
+    started, done = board.log_tail()
+    assert "write" in started and "started" in started
+    assert "write" in done and "done" in done
+
+
+def test_run_flow_stops_the_child_when_the_app_dies(tmp_path, monkeypatch):
+    from wpbuddy.tui import app as flow
+
+    monkeypatch.chdir(tmp_path)
+    events = tmp_path / "wpbuddy-audit" / "acme.test" / "runs" / \
+        "20261104-120000-abc" / "events.jsonl"
+    sent = []
+
+    def fake_popen(cmd, **kwargs):
+        return _FakePopen(cmd, events_path=events, events=_script(),
+                          running=True, **kwargs)
+
+    monkeypatch.setattr(flow.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(flow.os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
+    monkeypatch.setattr(flow, "_INTERRUPT_GRACE", 0.05)
+    _FakePopen.spawns.clear()
+    monkeypatch.setattr(flow, "FlowApp", _CrashingApp)
+
+    with pytest.raises(RuntimeError, match="textual died mid-run"):
+        flow.run_flow(["--target", "https://acme.test/"])
+    child = _FakePopen.spawns[-1]
+    assert (child.pid, signal.SIGINT) in sent  # the orphaned scan was stopped
+    assert (child.pid, signal.SIGKILL) in sent
+
+
+def test_child_guard_signal_handler_stops_the_child(tmp_path, monkeypatch):
+    from wpbuddy.tui import app as flow
+
+    sent = []
+    monkeypatch.setattr(flow.os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
+    monkeypatch.setattr(flow, "_INTERRUPT_GRACE", 0.05)
+    child = _FakePopen(["wpbuddy scan"], running=True)
+    guard = flow._ChildGuard(child).install()
+    try:
+        with pytest.raises(SystemExit) as caught:
+            guard._handle(signal.SIGTERM, None)  # a closed terminal, effectively
+    finally:
+        guard.close()
+    assert (child.pid, signal.SIGINT) in sent
+    assert caught.value.code == 128 + signal.SIGTERM  # conventional death code
+
+
+def test_flow_app_copy_notification_tolerates_markup_characters(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())
+    app = FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                  command="wpbuddy flow --run [a-z].jsonl", target="acme.test")
+    copied = []
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await _settle(app)
+            app.copy_to_clipboard = copied.append
+            await pilot.press("c")  # the command's brackets must not parse as markup
+            await pilot.pause()
+            assert copied == [app.command]
+            assert app.is_running
+
+    asyncio.run(scenario())
+
+
+def test_run_flow_reads_the_profile_from_a_recorded_runs_meta(tmp_path, monkeypatch):
+    from wpbuddy.tui import app as flow
+
+    run = tmp_path / "wpbuddy-audit" / "acme.test" / "runs" / "20261104-120000-abc"
+    _write_events(run / "events.jsonl", _script())
+    (run / "meta.json").write_text(json.dumps({
+        "target": "https://acme.test/",
+        "argv": ["--target", "https://acme.test/", "--profile", "deep"],
+    }), encoding="utf-8")
+    _FakeApp.instances.clear()
+    monkeypatch.setattr(flow, "FlowApp", _FakeApp)
+
+    assert flow.run_flow(["--run", str(run)]) == 0
+    assert _FakeApp.instances[-1].kwargs["profile"] == "deep"  # from meta.json argv
+
+
+def test_run_flow_clamps_signal_death_exit_codes(tmp_path, monkeypatch):
+    from wpbuddy.tui import app as flow
+
+    monkeypatch.chdir(tmp_path)
+    events = tmp_path / "wpbuddy-audit" / "acme.test" / "runs" / \
+        "20261104-120000-abc" / "events.jsonl"
+
+    def fake_popen(cmd, **kwargs):
+        return _FakePopen(cmd, events_path=events, events=_script(),
+                          exit_code=-15, **kwargs)  # scan killed by a signal
+
+    monkeypatch.setattr(flow.subprocess, "Popen", fake_popen)
+    _FakeApp.instances.clear()
+    monkeypatch.setattr(flow, "FlowApp", _FakeApp)
+
+    assert flow.run_flow(["--target", "https://acme.test/"]) == 0  # not -15
+
+
+def test_flow_app_http_response_does_not_rebuild_the_rail(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())
+    app = FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                  command=f"wpbuddy flow --run {events}", target="acme.test")
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await _settle(app)
+            rail = app.query_one("#rail")
+            before = [id(child) for child in rail.children]
+            app.apply_event(_event("http-response", "passive",
+                                   url="http://acme.test/late", status=200))
+            await pilot.pause()
+            after = [id(child) for child in rail.children]
+            assert after == before  # same ListItem objects: the rail was not rebuilt
+            assert "late" in app.query_one("#log").lines[-1].text  # log DID append
+            assert "requests 3" in str(app.query_one("#topbar").render())  # top bar too
+            app.apply_event(_event("phase-started", "active"))
+            await pilot.pause()
+            assert [id(child) for child in rail.children] != before  # phases rebuild it
+
+    asyncio.run(scenario())

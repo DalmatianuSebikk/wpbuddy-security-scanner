@@ -55,6 +55,13 @@ _RUN_APPEAR_TIMEOUT = 30.0
 _POLL_INTERVAL = 0.1
 # How many log-pane lines to ask the board for (keeps the pane bounded).
 _LOG_WINDOW = 1000
+# Signals that kill the TUI without Python unwind; guarded to POSIX.
+_GUARD_SIGNALS = tuple(getattr(signal, name) for name in ("SIGHUP", "SIGTERM")
+                       if hasattr(signal, name))
+# Phase-lifecycle events are the only ones that change a rail row's glyph.
+_PHASE_EVENTS = ("phase-started", "phase-finished", "phase-skipped", "phase-failed")
+# Events that move the top bar's numbers (requests count / run status).
+_TOPBAR_EVENTS = ("http-response", "run-started", "run-finished")
 
 
 def textual_available() -> bool:
@@ -95,6 +102,9 @@ class FlowApp(App):
         self.source_done = threading.Event()  # set once the source is drained
         self.log_lines_rendered = 0  # log pane appends only lines it has not shown
         self._events_seen = 0  # one board log line exists per applied event
+        self._rail_dirty = True  # first paint renders everything
+        self._findings_dirty = True
+        self._topbar_dirty = True
 
     # -------------------------------------------------------------- layout
 
@@ -107,7 +117,7 @@ class FlowApp(App):
             with Vertical(id="right"):
                 yield Static("", id="detail", markup=False)
                 yield ListView(id="findings")
-        yield RichLog(id="log")
+        yield RichLog(max_lines=_LOG_WINDOW, id="log")  # bounded retention
         yield Static(ABOUT_TEXT, id="about", markup=False)
         yield Static(HINTS, id="footer", markup=False)
 
@@ -124,9 +134,16 @@ class FlowApp(App):
     # -------------------------------------------------------------- events
 
     def apply_event(self, event: dict) -> None:
-        """Fold one event into the board and refresh the panes it touches."""
+        """Fold one event into the board; mark the panes it can change dirty."""
         self.board.apply(event)
         self._events_seen += 1
+        event_type = event.get("type") or ""
+        if event_type in _PHASE_EVENTS:
+            self._rail_dirty = True
+        if event_type == "finding":
+            self._findings_dirty = True
+        if event_type in _TOPBAR_EVENTS:
+            self._topbar_dirty = True
         self.refresh_panes()
 
     def _pump_source(self) -> None:
@@ -152,16 +169,22 @@ class FlowApp(App):
     # ------------------------------------------------------------ refresh
 
     def refresh_panes(self) -> None:
-        """Re-derive every pane from the board (log appends only new lines)."""
-        stats = self.board.stats()
-        self.query_one("#topbar").update(
-            f"target {self.target} · profile {self.profile} · "
-            f"requests {stats['requests']} · status {stats['status']}")
-        self._rebuild_list("#rail", [f"{glyph} {phase_id} {title}"
-                                     for glyph, phase_id, title in self.board.phases()])
-        self._rebuild_list("#findings", [f"{label} — {name}"
-                                         for label, name in self.board.findings()])
-        self._refresh_detail()
+        """Re-render only dirty panes (the log always appends just new lines)."""
+        if self._topbar_dirty:
+            stats = self.board.stats()
+            self.query_one("#topbar").update(
+                f"target {self.target} · profile {self.profile} · "
+                f"requests {stats['requests']} · status {stats['status']}")
+            self._topbar_dirty = False
+        if self._rail_dirty:
+            self._rebuild_list("#rail", [f"{glyph} {phase_id} {title}"
+                                         for glyph, phase_id, title in self.board.phases()])
+            self._rail_dirty = False
+            self._refresh_detail()  # a rebuilt rail can change the selected phase's text
+        if self._findings_dirty:
+            self._rebuild_list("#findings", [f"{label} — {name}"
+                                             for label, name in self.board.findings()])
+            self._findings_dirty = False
         self._append_log()
 
     def _rebuild_list(self, selector: str, rows: list[str]) -> None:
@@ -209,7 +232,7 @@ class FlowApp(App):
 
     def action_copy_command(self) -> None:
         self.copy_to_clipboard(self.command)
-        self.notify(f"copied: {self.command}")
+        self.notify(f"copied: {self.command}", markup=False)  # operator input, not markup
 
     def action_toggle_about(self) -> None:
         about = self.query_one("#about")
@@ -267,7 +290,9 @@ def run_flow(argv: list[str]) -> int:
         return 2
 
     if args.run or not args.target:
-        target = _target_label(events_path)
+        meta = _read_meta(events_path)
+        target = _target_label(events_path, meta)
+        profile = profile or _profile_from([str(part) for part in (meta.get("argv") or [])])
     else:
         target = host
 
@@ -280,7 +305,7 @@ def run_flow(argv: list[str]) -> int:
         if events_path is None:
             if proc.poll() is not None:
                 print("the scan ended without writing a run log (--no-run-log or --plan?)")
-                return proc.returncode or 0
+                return max(proc.returncode or 0, 0)
             print("the scan did not create a run log - stopping it")
             _stop_child(proc)
             return 1
@@ -297,14 +322,17 @@ def run_flow(argv: list[str]) -> int:
 
     app = FlowApp(source=source, board=ScanBoard(), command=command,
                   target=target, profile=profile or "safe", stop_event=stop_event)
-    app.run()
-
+    # The scan must never outlive the TUI: stop the child on every exit path
+    # (normal return, a textual crash, an exception) and on terminal-closing
+    # signals, which otherwise kill the TUI without Python-level unwinding.
+    guard = _ChildGuard(proc).install()
+    try:
+        app.run()
+    finally:
+        guard.close()
     if proc is None:
         return 0
-    if proc.poll() is not None:  # the scan finished before the app exited
-        return proc.returncode if proc.returncode is not None else 0
-    _stop_child(proc)  # the operator quit while the scan was still running
-    return 0
+    return max(proc.returncode or 0, 0)  # clamp signal deaths (-9/-15) to 0
 
 
 def _resolve_run_path(raw) -> Path | None:
@@ -368,13 +396,56 @@ def _signal_group(proc, sig) -> None:
             pass
 
 
-def _target_label(events_path: Path) -> str:
-    """Top-bar target for a recorded run: meta.json's target, else its host dir."""
+class _ChildGuard:
+    """Best-effort guarantee a spawned scan dies with the TUI.
+
+    `close()` runs from run_flow's finally (any exit path); SIGHUP/SIGTERM
+    (a closed terminal kills the TUI without Python unwind) stop the child
+    too, then exit with the conventional 128+signum code. Signal handlers
+    are installed only in the main thread and restored on close.
+    """
+
+    def __init__(self, proc):
+        self.proc = proc
+        self._previous: dict = {}
+
+    def install(self) -> _ChildGuard:
+        if self.proc is None:  # recorded run: nothing to guard
+            return self
+        for sig in _GUARD_SIGNALS:
+            try:
+                self._previous[sig] = signal.signal(sig, self._handle)
+            except (ValueError, OSError):  # not the main thread / unsupported
+                pass
+        return self
+
+    def _handle(self, signum, frame) -> None:
+        _stop_child(self.proc)
+        raise SystemExit(128 + signum)
+
+    def close(self) -> None:
+        for sig, previous in self._previous.items():
+            try:
+                signal.signal(sig, previous)
+            except (ValueError, OSError):
+                pass
+        self._previous.clear()
+        if self.proc is not None and self.proc.poll() is None:
+            _stop_child(self.proc)
+
+
+def _read_meta(events_path: Path) -> dict:
+    """The run's meta.json as a dict ({} when absent or unreadable)."""
     try:
         meta = json.loads((events_path.parent / "meta.json").read_text(encoding="utf-8"))
-        target = meta.get("target")
-    except (OSError, ValueError, AttributeError):
-        target = None
+    except (OSError, ValueError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _target_label(events_path: Path, meta: dict | None = None) -> str:
+    """Top-bar target for a recorded run: meta.json's target, else its host dir."""
+    target = (meta if meta is not None else _read_meta(events_path)).get("target")
     if target:
         return urlsplit(str(target)).hostname or str(target)
     parts = events_path.parent.parts  # .../wpbuddy-audit/<host>/runs/<run_id>
