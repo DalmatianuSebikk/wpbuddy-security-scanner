@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from .. import risk
+from ..confidence import ScanModel
 from ..report import Report
 
 
@@ -121,42 +122,26 @@ def write_diff_section(report, model, previous_json_path, target):
     except (OSError, ValueError) as e:
         print(f"[!] --diff: could not read previous graph ({e}); skipping")
         return
-    prev_nodes = {n["id"]: n for n in previous.get("nodes", [])}
-    current = model.to_dict(target)
-    curr_nodes = {n["id"]: n for n in current["nodes"]}
-
-    prev_components = {i for i, n in prev_nodes.items() if n.get("type") != "vulnerability"}
-    curr_components = {i for i, n in curr_nodes.items() if n.get("type") != "vulnerability"}
-    new_components = sorted(curr_components - prev_components)
-    gone_components = sorted(prev_components - curr_components)
-
-    def vuln_set(nodes, source):
-        out = set()
-        for edge in (previous.get("edges") if source is prev_nodes else current["edges"]):
-            if edge.get("relation") != "affected-by":
-                continue
-            label = nodes.get(edge["to"], {}).get("label", "?")
-            out.add((edge["from"], label))
-        return out
-
-    prev_vulns, curr_vulns = vuln_set(prev_nodes, prev_nodes), vuln_set(curr_nodes, curr_nodes)
+    changes = ScanModel.graph_diff(previous, model.to_dict(target))
 
     report.section("Changes since previous scan")
-    if not (new_components or gone_components or prev_vulns or curr_vulns):
+    if not any(changes.values()):
         report.paragraph("No component or vulnerability changes against the previous graph.")
         return
-    if new_components:
-        report.paragraph("New since the previous scan: " + ", ".join(f"`{c}`" for c in new_components))
-    if gone_components:
-        report.paragraph("No longer present: " + ", ".join(f"`{c}`" for c in gone_components))
-    new_vulns = sorted(curr_vulns - prev_vulns)
-    resolved = sorted(prev_vulns - curr_vulns)
-    if new_vulns:
+    if changes["new_components"]:
+        report.paragraph("New since the previous scan: "
+                         + ", ".join(f"`{c}`" for c in changes["new_components"]))
+    if changes["gone_components"]:
+        report.paragraph("No longer present: "
+                         + ", ".join(f"`{c}`" for c in changes["gone_components"]))
+    if changes["new_findings"]:
         report.paragraph("**New findings:**")
-        report.bullets([f"{component}: {label}" for component, label in new_vulns])
-    if resolved:
+        report.bullets([f"{component}: {label}"
+                        for component, label in changes["new_findings"]])
+    if changes["resolved_findings"]:
         report.paragraph("Resolved since the previous scan (update worked / component gone): "
-                         + ", ".join(f"{component}: {label}" for component, label in resolved))
+                         + ", ".join(f"{component}: {label}"
+                                     for component, label in changes["resolved_findings"]))
 
 
 def fail_on_check(model, fail_on, suppressions):

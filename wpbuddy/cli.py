@@ -305,7 +305,7 @@ def _dispatch_subcommand(name, argv):
 
 def _cmd_report(argv):
     """`wpbuddy report diff` - graph comparison without a new scan (roadmap §2.2)."""
-    from .confidence import graph_diff
+    from .confidence import ScanModel
     parser = argparse.ArgumentParser(prog="wpbuddy report", description="Report tooling")
     sub = parser.add_subparsers(dest="report_command", required=True)
     diff = sub.add_parser("diff", help="Compare two knowledge-graph JSONs")
@@ -320,10 +320,10 @@ def _cmd_report(argv):
     except (OSError, ValueError) as e:
         parser.error(f"could not read graphs: {e}")
 
-    changes = graph_diff(previous, current)
+    changes = ScanModel.graph_diff(previous, current)
     if not any(changes.values()):
         print("No component or vulnerability changes between the two graphs.")
-        return
+        sys.exit(0)
     for component in changes["new_components"]:
         print(f"+ component: {component}")
     for component in changes["gone_components"]:
@@ -332,6 +332,7 @@ def _cmd_report(argv):
         print(f"+ finding:   {component}: {label}")
     for component, label in changes["resolved_findings"]:
         print(f"- finding:   {component}: {label}")
+    sys.exit(0)
 
 
 def main(argv=None):
