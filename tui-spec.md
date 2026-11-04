@@ -1,9 +1,12 @@
 # WpBuddy TUI — flow observatory specification
 
-Status: **engine scaffolding done.** `wpbuddy/engine/phases.py` (graph),
-`wpbuddy/engine/events.py` (typed events), `wpbuddy/engine/run.py` (engine,
-`--explain`) and `wpbuddy/runs/store.py` (append-only `events.jsonl`) exist and
-back the CLI. The Textual app (`wpbuddy/tui/`) is next.
+Status: **engine scaffolding done; Textual app deferred.** The shared phase graph
+(`wpbuddy/engine/phases.py`), typed events (`wpbuddy/engine/events.py`), scan engine
+(`wpbuddy/engine/run.py`, `--explain`) and append-only run store
+(`wpbuddy/runs/store.py`) exist and back the CLI. The TUI itself moves to the end of the
+exploitation roadmap: the read-only/observe slice is still correct, but its most valuable
+screens (exploit plan, execute, artifacts, cleanup) need actions that do not exist yet.
+Until then, the CLI plus `events.jsonl` is the interface.
 
 Goal: a TUI that makes the **flow** of a scan understandable. It is a pipeline observatory,
 not a miniature web dashboard. Every phase exposes its inputs, checks, outputs, skip reasons
@@ -241,10 +244,14 @@ Textual widgets: `PhaseRail(ListView)`, `FlowCanvas`, `PhasePanel(TabbedContent)
 
 ## Delivery order
 
+Deferred until the exploitation stages 1–2 exist. The engine/event/log foundation is
+already in place; build the read-only shell then, and the control plane after
+engagement/session/effects exist.
+
 1. **[done]** Phase registry, event bus, JSONL run store, CLI `--plan` / `--explain` / `--no-run-log`.
-2. Textual shell: header, phase rail, phase detail, event log.
+2. Textual shell: header, phase rail, phase detail, event log — after exploitation stage 1.
 3. Lineage + confidence ledger + evidence panes.
-4. Explain/step/breakpoint controller.
+4. Explain/step/breakpoint controller — after the engagement/session model.
 5. Replay scrubber and demo script.
 6. Findings/status actions, then exploit-plan and cleanup screens.
 7. Pilot tests, golden JSONL, screenshots, docs.

@@ -258,7 +258,7 @@ Each feature ships with its own design note under `docs/design/`.
 - [x] **F-10 Reporting** (583bde5): executive summary + metadata, `--diff`, `--fail-on`, `--suppressions`. HTML/PDF/SARIF deferred.
 - [x] **F-11 PoC verifier hardening** (711ec80): multi-parameter payloads, unescaped-payload XSS confirmation, /etc/passwd-first LFI evidence, wall-clock budget.
 - [x] **F-12 Semgrep rules** (7b0c2a9): bundled rule pack + `--semgrep` (optional binary); AST taint engine deferred — see note.
-- [ ] **F-13 Bulk inventory/resume/schedule + UI** — design note only (`docs/design/F-13-bulk-resume-ui.md`); engine scaffolding (phase graph, typed events, append-only run log, `--plan`/`--explain`) landed for the TUI in `tui-spec.md`; Textual app and bulk/resume still TODO.
+- [ ] **F-13 Bulk inventory/resume/schedule + UI** — design note only (`docs/design/F-13-bulk-resume-ui.md`); engine scaffolding (phase graph, typed events, append-only run log, `--plan`/`--explain`) landed in `tui-spec.md`; Textual app deliberately deferred until the exploitation stages land. Bulk/resume still TODO.
 - [ ] **F-14 i18n (EN/RO)** — design note only (`docs/design/F-14-i18n.md`); deferred until the CLI subcommand split.
 
 ---
