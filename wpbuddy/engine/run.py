@@ -16,6 +16,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .. import __version__
 from . import events as scan_events
@@ -61,6 +62,9 @@ class ScanContext:
     # Engagement (roadmap 2.3): scope/authorization/budgets; persisted with
     # the run when a run store is attached.
     engagement: object | None = None
+    # Run directory (set by the engine when a run store creates it); the
+    # evidence layer (2.5) writes artifacts here.
+    run_dir: object | None = None
 
 
 # --------------------------------------------------------------------------
@@ -144,9 +148,10 @@ def _h_report(ctx, emit):
         print(f"[*] --fail-on check skipped: {exc}")
 
     emit(EventType.CHECK_STARTED, subphase="write")
+    report_path = f"{ctx.output}.md"
     try:
-        ctx.report.write(f"{ctx.output}.md")
-        print(f"[*] Report saved: {ctx.output}.md")
+        ctx.report.write(report_path)
+        print(f"[*] Report saved: {report_path}")
     except Exception as exc:
         ctx.write_failed = True
         print(f"[!] Could not write the report: {exc}")
@@ -157,6 +162,19 @@ def _h_report(ctx, emit):
             print(f"[*] Knowledge graph saved: {ctx.output}.json")
         except Exception as exc:
             print(f"[!] Could not write the JSON graph: {exc}")
+    # Evidence layer (roadmap 2.5): the run's outputs are registered as
+    # artifacts of the run, next to meta/engagement/events - one
+    # self-describing directory per run.
+    try:
+        if ctx.run_dir is not None:
+            from ..evidence import EvidenceStore
+            store = EvidenceStore(ctx.run_dir, emit=emit)
+            if not ctx.write_failed:
+                store.register_artifact(report_path, "scan report (Markdown)")
+            if ctx.json_output and Path(f"{ctx.output}.json").is_file():
+                store.register_artifact(f"{ctx.output}.json", "knowledge graph (JSON)")
+    except Exception as exc:  # bookkeeping must never fail the report phase
+        print(f"[*] Artifact registration skipped: {exc}")
     emit(EventType.CHECK_FINISHED, subphase="write")
 
 
@@ -269,6 +287,7 @@ class ScanEngine:
         if self.store is not None:
             self.ctx.run_id = self.store.create(self.ctx.target, argv)
             if self.ctx.run_id:
+                self.ctx.run_dir = self.store.dir
                 self._unsubscribe.append(self.store.attach(self.ctx.bus))
                 # the engagement is part of the run's audit trail (roadmap 2.3)
                 engagement = getattr(self.ctx, "engagement", None)

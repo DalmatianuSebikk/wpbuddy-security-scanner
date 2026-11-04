@@ -3217,6 +3217,65 @@ def test_aimd_rate_control():
     assert rate.blocked == 2
 
 
+# ------------------------------------------------------------- evidence store (§2.5)
+
+def test_evidence_store_artifacts_and_cleanup(tmp_path):
+    """Artifacts land inside the run dir, are registered + emitted, and the
+    cleanup log records reversals for stage-4 replay."""
+    from wpbuddy.evidence import EvidenceStore
+    events = []
+    store = EvidenceStore(tmp_path / "run-1", emit=lambda kind, **data:
+                          events.append((kind, data)))
+
+    store.save_artifact("exploit-evidence.txt", "GET /x -> 200 marker",
+                        description="raw LFI probe evidence")
+    assert (tmp_path / "run-1" / "artifacts" / "exploit-evidence.txt").read_text() == \
+        "GET /x -> 200 marker"
+
+    report = tmp_path / "report.md"
+    report.write_text("# r")
+    store.register_artifact(report, "scan report")
+
+    store.record_cleanup("exploit-evidence.txt", "ok", "deleted uploaded shell.php")
+    store.record_cleanup("report.md", "n/a", "nothing to undo")
+
+    names = [a["name"] for a in store.artifacts()]
+    assert "exploit-evidence.txt" in names and "report.md" in names
+    assert store.cleanup_log()[0]["status"] == "ok"
+    assert events[0][0] == "artifact"
+    assert events[-1][0] == "cleanup"
+
+    # a fresh instance reads the same registry back (persistence)
+    again = EvidenceStore(tmp_path / "run-1")
+    assert len(again.artifacts()) == 2
+    assert len(again.cleanup_log()) == 2
+
+    # path games are contained: names never escape the artifacts dir
+    store.save_artifact("../escape.txt", "nope")
+    assert not (tmp_path / "escape.txt").exists()
+    assert (tmp_path / "run-1" / "artifacts" / "escape.txt").exists()
+
+
+def test_scan_registers_outputs_as_run_artifacts(mock, tmp_path, monkeypatch):
+    """--json runs register report + graph in artifacts.json of the run dir."""
+    monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: None)
+    monkeypatch.chdir(tmp_path)
+    from wpbuddy import cli
+
+    out = tmp_path / "ev"
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["scan", "--target", mock, "--pluginList", "", "--audit-code", "off",
+                  "--json", "--output", str(out)])
+    assert exc.value.code == 0
+    registries = list((tmp_path / "wpbuddy-audit").glob("*/runs/*/artifacts.json"))
+    assert len(registries) == 1
+    import json as _json
+    registry = _json.loads(registries[0].read_text())
+    described = {a["description"] for a in registry["artifacts"]}
+    assert "scan report (Markdown)" in described
+    assert "knowledge graph (JSON)" in described
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
