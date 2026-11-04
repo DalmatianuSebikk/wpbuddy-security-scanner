@@ -1,14 +1,19 @@
-"""Unit tests for the TUI's pure event board (`wpbuddy.tui.render`).
+"""Unit tests for the TUI's event plumbing: board and event sources.
 
-The board folds event dicts shaped like `Event.to_dict()` (see
-`wpbuddy.engine.events`) into pane models: phase-rail glyphs, phase detail
-text, findings, a formatted log tail and top-bar stats. It is pure stdlib —
-no Textual, no I/O — so the app pane code only renders what these methods
-return.
+The board (`wpbuddy.tui.render`) folds event dicts shaped like
+`Event.to_dict()` (see `wpbuddy.engine.events`) into pane models: phase-rail
+glyphs, phase detail text, findings, a formatted log tail and top-bar stats.
+The sources (`wpbuddy.tui.tail`) read those event dicts out of a run's
+`events.jsonl`, live or recorded. Both are pure stdlib — no Textual — so
+everything here is unit-testable without a terminal.
 """
+
+import json
+import threading
 
 from wpbuddy.engine.phases import PhaseSpec, default_graph
 from wpbuddy.tui.render import ScanBoard
+from wpbuddy.tui.tail import follow, read_events, replay
 
 TS = "2026-11-04T12:00:00.000+00:00"
 
@@ -161,3 +166,59 @@ def test_default_graph_matches_the_engine():
     board = ScanBoard()
     assert [phase_id for _, phase_id, _ in board.phases()] == \
         list(default_graph().ids())
+
+
+# ------------------------------------------------------------ event sources
+
+def test_read_events_returns_good_events_and_counts_the_corrupt_line(tmp_path):
+    path = tmp_path / "events.jsonl"
+    first = _event("run-started", seq=1, target="acme.test")
+    last = _event("run-finished", seq=3, status="completed")
+    truncated = '{"seq": 2, "ts": "2026-11-04T12:00:01.000+00:00"'  # crash cut it
+    path.write_text(
+        "\n".join([json.dumps(first), truncated, json.dumps(last), ""]),
+        encoding="utf-8",
+    )
+    events, skipped = read_events(path)
+    assert events == [first, last]
+    assert skipped == 1
+
+
+def test_replay_yields_the_recorded_events_and_skips_malformed_lines(tmp_path):
+    path = tmp_path / "events.jsonl"
+    first = _event("run-started", seq=1, target="acme.test")
+    last = _event("run-finished", seq=2, status="completed")
+    path.write_text(
+        f"{json.dumps(first)}\nnot json at all\n{json.dumps(last)}\n",
+        encoding="utf-8",
+    )
+    assert list(replay(path)) == [first, last]
+
+
+def test_follow_yields_appended_events_then_stops_after_run_finished(tmp_path):
+    path = tmp_path / "events.jsonl"
+    path.write_text("", encoding="utf-8")
+    stop = threading.Event()
+
+    def writer():
+        for delay, batch in [
+            (0.05, [_event("run-started", seq=1, target="acme.test"),
+                    _event("phase-started", "liveness", seq=2)]),
+            (0.05, [_event("run-finished", seq=3, status="completed")]),
+        ]:
+            stop.wait(delay)  # let the follower settle into its poll loop
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.writelines(json.dumps(event) + "\n" for event in batch)
+
+    tailer = threading.Thread(target=writer)
+    tailer.start()
+    events = list(follow(path, stop, poll=0.01))
+    tailer.join(timeout=5)
+    assert [event["seq"] for event in events] == [1, 2, 3]
+    assert events[-1]["type"] == "run-finished"
+
+
+def test_follow_polls_for_a_missing_file_and_returns_once_stop_is_set(tmp_path):
+    stop = threading.Event()
+    stop.set()  # already asked to stop: no file, no events, no hang
+    assert list(follow(tmp_path / "nope.jsonl", stop, poll=0.01)) == []
