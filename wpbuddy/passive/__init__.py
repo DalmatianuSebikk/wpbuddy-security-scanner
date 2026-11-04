@@ -22,39 +22,87 @@ from .. import confidence, config, vulndb
 from . import assets, content, core_version, dangling, files, fingerprints, posture, readme, wprest
 
 
-def run(report, target, args, model=None):
+def run(report, target, args, model=None, emit=None):
     """Run the full passive phase. Returns {'plugins': {slug: ver}, 'themes': {slug: ver}}."""
     if model is None:
         model = confidence.ScanModel()
     results = {"plugins": {}, "themes": {}}
 
+    def check(step):
+        if emit:
+            emit("check-started", subphase=step)
+
+    def done(step, **data):
+        if emit:
+            emit("check-finished", subphase=step, **data)
+
+    check("rest-discovery")
     namespaces = wprest.discover_rest_namespaces(target)
+    done("rest-discovery", count=len(namespaces or ()))
+
     # one crawl shared by every consumer (plugin refs, fingerprints, dangling DNS)
+    check("crawl")
     pages = content.crawl_page_urls(target, args.max_pages)
+    done("crawl", count=len(pages))
+
+    check("references")
     refs, artifacts = content.discover_refs(pages, target)
+    done("references", plugins=len(refs["plugins"]), themes=len(refs["themes"]))
+
     # ?ver= parameters on component assets (F-5): version source of last
     # resort when no readme is readable
     from urllib.parse import urlparse as _urlparse
+    check("asset-versions")
     versions_from_assets = assets.asset_versions(artifacts.get("pages_html", ""),
                                                  (_urlparse(target).hostname or "").lower())
+    done("asset-versions", count=len(versions_from_assets))
 
+    check("core-version")
     _scan_core(report, target, model)
+    done("core-version")
+
+    check("plugins")
     results["plugins"] = _scan_plugins(report, target, args, namespaces, model, pages,
                                        refs, artifacts, versions_from_assets)
+    done("plugins", count=len(results["plugins"]))
+
+    check("themes")
     results["themes"] = _scan_themes(report, target, model, refs, versions_from_assets)
+    done("themes", count=len(results["themes"]))
+
+    check("rest")
     _scan_rest(report, target, namespaces)
-    files.check_robots(report, target)
-    files.check_security_txt(report, target)
-    files.check_sensitive_files(report, target)
-    files.check_setup_wizard(report, target)
-    files.check_headers(report, target)
+    done("rest")
+
+    for step, action in (
+        ("robots", lambda: files.check_robots(report, target)),
+        ("security-txt", lambda: files.check_security_txt(report, target)),
+        ("sensitive-files", lambda: files.check_sensitive_files(report, target)),
+        ("setup-wizard", lambda: files.check_setup_wizard(report, target)),
+        ("headers", lambda: files.check_headers(report, target)),
+    ):
+        check(step)
+        action()
+        done(step)
+
+    check("dangling")
     dangling.check(report, target, artifacts.get("pages_html", ""))
+    done("dangling")
+
+    check("posture")
     posture.check(report, target)
+    done("posture")
+
+    check("extra-checks")
     from . import extrachecks  # F-9: wp-cron, install pages, CORS, cookies
     extrachecks.run(report, target)
+    done("extra-checks")
+
     if config.AUTH_COOKIE or config.AUTH_BASIC:
+        check("auth-check")
         from . import authcheck  # deferred: only imported when creds exist
         authcheck.check(report, target)
+        done("auth-check")
     return results
 
 

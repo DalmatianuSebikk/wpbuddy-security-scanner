@@ -15,6 +15,8 @@ import re
 from urllib.parse import urlsplit
 
 from . import config
+from .engine import events as scan_events
+from .engine.events import EventType
 
 # name -> ({header-name: value-prefix/regex/None}, cookie-prefixes, body-regex-TUPLES)
 SIGNATURES = {
@@ -88,16 +90,19 @@ def inspect_response(resp):
                     or (hasattr(marker, "search") and marker.search(value)):
                 _detected.add(name)
                 print(f"[*] WAF detected: {name} (via {header} header)")
+                scan_events.emit_event(EventType.WAF_DETECTED, name=name, via=f"{header} header")
                 break
         if name in _detected:
             continue
         if any(c.startswith(p) for c in cookies.split() for p in cookie_prefixes):
             _detected.add(name)
             print(f"[*] WAF detected: {name} (via cookie)")
+            scan_events.emit_event(EventType.WAF_DETECTED, name=name, via="cookie")
             continue
         if any(rx.search(body_head) for rx in body_res):
             _detected.add(name)
             print(f"[*] WAF detected: {name} (via block-page content)")
+            scan_events.emit_event(EventType.WAF_DETECTED, name=name, via="block-page content")
 
 
 def is_blocked(resp):
@@ -110,11 +115,14 @@ def is_blocked(resp):
 def note_block():
     global _blocked_responses
     _blocked_responses += 1
+    scan_events.emit_event(EventType.WAF_BLOCK)
 
 
 def note_bypass(technique):
     _bypass_events[technique] = _bypass_events.get(technique, 0) + 1
     print(f"[*] WAF bypass: plain path was blocked, variant '{technique}' got through")
+    scan_events.emit_event(EventType.WAF_BYPASS, technique=technique,
+                           detail=f"plain path blocked; variant '{technique}' got through")
 
 
 def detected():

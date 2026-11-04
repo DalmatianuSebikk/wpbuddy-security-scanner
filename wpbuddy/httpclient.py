@@ -116,6 +116,12 @@ def request(method, url, *, timeout=None, retries=config.DEFAULT_RETRIES,
     if _rate_limit_backoff > 0:
         time.sleep(_rate_limit_backoff)  # cool down from an earlier 429
 
+    # Event log: one request event and one final response (or failure) event.
+    # The run log is append-only evidence for `--explain` and replay.
+    from .engine import events as scan_events
+    started = time.monotonic()
+    scan_events.emit_http_request(method, url)
+
     last_error = None
     for attempt in range(retries):
         try:
@@ -136,6 +142,7 @@ def request(method, url, *, timeout=None, retries=config.DEFAULT_RETRIES,
             _consecutive_failures = 0
             _polite_pause()
             inspect_response(resp)
+            scan_events.emit_http_response(resp, time.monotonic() - started)
             return resp
         except Exception as e:  # connection errors, timeouts, DNS, TLS...
             last_error = e
@@ -149,6 +156,7 @@ def request(method, url, *, timeout=None, retries=config.DEFAULT_RETRIES,
         print(f"[!] {CONSECUTIVE_FAILURE_LIMIT} consecutive requests failed at network level - "
               "the target or your connection may be down; continuing with single attempts")
     print(f"[!] Giving up on {url} after {retries} attempts ({last_error})")
+    scan_events.emit_http_response(None, time.monotonic() - started, error=last_error)
     return None
 
 

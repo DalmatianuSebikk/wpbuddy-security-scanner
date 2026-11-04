@@ -4,6 +4,12 @@
 roadmap's engagement model (`Engagement` → `Run` persistence) exists —
 everything below is persistence-layer work on top of it.
 
+Update: the shared engine scaffolding for the read-only UI has landed —
+phase graph (`wpbuddy/engine/phases.py`), typed events
+(`wpbuddy/engine/events.py`), append-only run log
+(`wpbuddy/runs/store.py`) and `--plan`/`--explain`. The Textual app and the
+bulk/resume work below are still open; see `tui-spec.md`.
+
 ## Shape of the eventual design
 
 - **Bulk inventory**: a `targets.txt` (or `--targets-file`) of base URLs;

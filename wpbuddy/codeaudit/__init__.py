@@ -32,10 +32,18 @@ _MODES = ("auto", "target", "source", "off")
 _ORIGIN_MARKER = ".origin"
 
 
-def run(report, target, passive_results, args):
+def run(report, target, passive_results, args, emit=None):
     mode = getattr(args, "audit_code", "auto")
     if mode not in _MODES or mode == "off":
         return {}
+
+    def check(step):
+        if emit:
+            emit("check-started", subphase=step)
+
+    def done(step, **data):
+        if emit:
+            emit("check-finished", subphase=step, **data)
 
     report.section("Local source-code audit")
     report.paragraph(
@@ -65,6 +73,7 @@ def run(report, target, passive_results, args):
                              ("theme", passive_results.get("themes", {}))):
         for slug, version in components.items():
             label = f"{kind} {slug}" + (f" {version}" if version else "")
+            check("gather")
             # cache directory includes the VERSION: a cached download of 2.1
             # must never be audited and reported as the 2.4 running now
             path = workdir / f"{kind}-{slug}-{version}" if version else \
@@ -88,28 +97,44 @@ def run(report, target, passive_results, args):
                 source, origin, reason = _gather(mode, kind, slug, version, target, path,
                                                  source_dir=source_dir)
                 if source is None:
+                    done("gather", component=label, status="skipped", reason=reason)
                     if reason:
                         unaudited.append((label, reason))
                     continue
                 mirrored = "mirrored" in origin
                 _mark_cache_origin(path, "mirrored" if mirrored else "official")
+            done("gather", component=label, status="mirrored" if mirrored else "official")
+            check("analyze")
             findings = analyzer.analyze(source)
+            done("analyze", component=label, count=len(findings))
             # malware/webshell/secret findings render in the same component
             # list (F-7); they are findings about the code itself
+            check("malware")
             findings += malware.scan(source)
+            done("malware")
             if getattr(args, "semgrep", False):
+                check("semgrep")
                 extra = semgrep.scan(source)
                 if extra:
                     findings += extra
+                done("semgrep", count=len(extra))
             findings.sort(key=lambda f: (analyzer.SEVERITY_ORDER[f["severity"]],
                                          f["file"], f["line"]))
             if getattr(args, "verify_pocs", False) and findings:
+                check("verify")
                 findings = poc.verify_findings(report, target, kind, findings, mirrored)
+                done("verify", component=label)
             if mirrored and version:
+                check("integrity")
                 _integrity_check(report, label, kind, slug, version, path)
+                done("integrity", component=label)
+            check("dependencies")
             inventory, dep_advisories = deps.scan(source)
             deps.report_dependencies(report, label, inventory, dep_advisories)
+            done("dependencies", component=label, count=len(inventory))
+            check("report")
             _report_component(report, label, origin, source, findings)
+            done("report", component=label)
             audited[slug] = findings
             pack_entries += [
                 (label, f, f["poc"]["poc"])

@@ -98,6 +98,10 @@ def inspect(resp):
                  + (["author-enumeration blocking is active"] if AUTHOR_BLOCK_RE.search(body) else []),
         "excerpt": _excerpt(body),
     }
+    from ..engine import events as scan_events
+    from ..engine.events import EventType
+    scan_events.emit_event(EventType.ERROR_PAGE, url=_seen[key]["url"], status=status,
+                           plugins=_seen[key]["plugins"], paths=_seen[key]["paths"])
 
 
 WEB_ROOTS = {"public_html", "httpdocs", "htdocs", "www", "html", "web", "public", "public_http"}

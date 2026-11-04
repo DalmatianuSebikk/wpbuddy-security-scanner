@@ -26,6 +26,8 @@ import json
 from pathlib import Path
 
 from . import risk
+from .engine import events as scan_events
+from .engine.events import EventType
 
 TIERS = ("CONFIRMED", "LIKELY", "UNVERIFIED", "ASSUMED")
 _TIER_MIN_SCORE = {"CONFIRMED": 80, "LIKELY": 55, "UNVERIFIED": 20}
@@ -160,6 +162,11 @@ class ScanModel:
             node["version_source"] = version_kind
         if conf is not None:
             node["confidence"] = conf
+        if conf and "score" in conf:
+            scan_events.emit_event(EventType.CONFIDENCE, component=node_id,
+                                   score=conf.get("score"),
+                                   tier=conf.get("tier") or tier_for(conf["score"]),
+                                   presence=list(presence), version_kind=version_kind)
         return node_id
 
     def add_vulnerability(self, component_id, vuln, conf=None):
@@ -180,6 +187,11 @@ class ScanModel:
             self._nodes[node_id]["confidence"] = conf
         self._edges.append({"from": component_id, "to": node_id,
                             "relation": "affected-by"})
+        scan_events.emit_event(EventType.FINDING, component=component_id,
+                               name=node_id, detail=self._nodes[node_id].get("label"),
+                               severity=self._nodes[node_id].get("severity"),
+                               basis=self._nodes[node_id].get("applicability"),
+                               score=(conf or {}).get("score"))
         return node_id
 
     def add_credential(self, user, password, via=None):
@@ -199,6 +211,8 @@ class ScanModel:
             self._nodes[node_id]["via"] = via
         self._edges.append({"from": "site", "to": node_id,
                             "relation": "compromised-by"})
+        scan_events.emit_event(EventType.FINDING, component="site", name=node_id,
+                               detail=f"working credential for {user}")
         return node_id
 
     def risks(self):

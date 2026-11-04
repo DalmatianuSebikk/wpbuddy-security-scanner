@@ -13,6 +13,7 @@ import copy
 import pytest
 
 from wpbuddy import config, httpclient, vulndb, waf
+from wpbuddy.engine import events as scan_events
 from wpbuddy.passive import errorpages, files
 
 
@@ -36,6 +37,7 @@ def _isolate_scan_state(tmp_path):
     waf.reset()
     errorpages.reset()
     vulndb._nvd_cache.clear()
+    scan_events.clear_sink()
 
     yield
 
@@ -44,6 +46,7 @@ def _isolate_scan_state(tmp_path):
     errorpages.reset()
     vulndb._nvd_cache.clear()
     vulndb._nvd_last_fetch = 0.0
+    scan_events.clear_sink()
     for key, value in http_snapshot.items():
         setattr(httpclient, key, value)
     for key, value in config_snapshot.items():

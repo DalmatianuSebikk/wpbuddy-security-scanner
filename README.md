@@ -139,6 +139,8 @@ normalization needs tuning.
 main.py                 entry point (thin wrapper)
 wpbuddy/
   cli.py                argument parsing and scan orchestration
+  engine/               shared phase graph, typed event bus, scan engine, report finalization
+  runs/store.py         append-only run log: meta.json + events.jsonl, replay iterator
   httpclient.py         single HTTP layer: timeouts, UA rotation, retries, delay
   vulndb.py             wpvulnerability.net client + version/operator matching
   versioning.py, report.py, config.py
@@ -148,6 +150,21 @@ wpbuddy/
 data/                   plugin list, spray list, dictionary, persona data
 tests/                  mock WordPress site + pytest suite (runs offline)
 ```
+
+### Inspecting a run
+
+The CLI and a future TUI share one phase graph (`wpbuddy/engine/phases.py`).
+Every run appends typed events to `wpbuddy-audit/<host>/runs/<run_id>/events.jsonl`
+(disable with `--no-run-log`) and records `meta.json` next to it.
+
+```bash
+python main.py --target https://example.com/ --plan       # resolved phases + skip reasons
+python main.py --target https://example.com/ --explain    # annotate decisions while scanning
+```
+
+`--plan` sends no requests. Every phase documents its purpose, preconditions,
+inputs, outputs, effects and subphases; skips are explicit reasons, never
+silent.
 
 ## Development
 
