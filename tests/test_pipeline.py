@@ -3156,6 +3156,67 @@ def test_cli_scan_persists_engagement_in_run_dir(mock, tmp_path, monkeypatch):
     assert saved.allowed_effects == ("read",)
 
 
+# ------------------------------------------------------------- injectable clients (§2.4)
+
+def test_sync_client_is_injectable_and_isolated(mock):
+    """Two SyncClients own their sessions and personas independently."""
+    from wpbuddy.client import SyncClient
+    chrome = SyncClient(persona="chrome-win")
+    safari = SyncClient(persona="safari-mac")
+    assert chrome.persona["name"] != safari.persona["name"]
+
+    resp = chrome.get(f"{mock}wpbuddy-echo")
+    assert resp is not None and resp.status_code == 200
+    assert resp.json()["ua"].startswith("Mozilla/5.0 (Windows NT 10.0")
+    resp2 = safari.get(f"{mock}wpbuddy-echo")
+    assert resp2.json()["ua"].startswith("Mozilla/5.0 (Macintosh")
+    chrome.close()
+    safari.close()
+
+    # retries exhausted on a dead URL -> None, not an exception
+    assert SyncClient(timeout=0.5).get("http://127.0.0.1:1/x", retries=1) is None
+
+
+def test_async_client_fetches_and_pools(mock):
+    """The async backend (curl_cffi or httpx, whichever is installed) works
+    behind the same interface; fetch_many bounds concurrency."""
+    import asyncio
+
+    from wpbuddy.client import AsyncClient
+
+    async def scenario():
+        client = AsyncClient()
+        assert client.backend in ("curl_cffi", "httpx")
+        resp = await client.get(f"{mock}wpbuddy-echo")
+        assert resp is not None and resp.status_code == 200
+        urls = [f"{mock}wpbuddy-echo?i={i}" for i in range(10)]
+        seen = []
+        results = await client.fetch_many(urls, concurrency=4,
+                                          on_result=lambda u, r: seen.append(u))
+        assert len(results) == 10
+        assert all(r is not None and r.status_code == 200 for r in results.values())
+        assert sorted(seen) == sorted(urls)
+        await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_aimd_rate_control():
+    from wpbuddy.client import AIMDRate
+    rate = AIMDRate(min_delay=0.0, max_delay=5.0)
+    ok = FakeResp(200, "fine")
+    assert rate.delay() == 0.0
+    rate.observe(FakeResp(429, "slow down"))
+    assert rate.delay() >= 0.05
+    hot = rate.delay()
+    rate.observe(FakeResp(429, "again"))
+    assert rate.delay() == min(hot * 2, 5.0)
+    for _ in range(50):
+        rate.observe(ok)                     # decay back toward the floor
+    assert rate.delay() <= 0.01
+    assert rate.blocked == 2
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
