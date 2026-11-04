@@ -58,6 +58,19 @@ SQL_ERROR_RE = re.compile(
     r"syntax error)", re.I)
 
 
+def _base64_decodable(body):
+    """php://filter base64 output: decodable, non-empty, printable-ish."""
+    import base64
+    text = body.strip()
+    if not text or len(text) % 4 != 0:
+        return False
+    try:
+        decoded = base64.b64decode(text, validate=True)
+    except (ValueError, TypeError):
+        return False
+    return len(decoded) > 0 and any(32 <= b < 127 or b in (9, 10, 13) for b in decoded[:64])
+
+
 def url_for_finding(finding, target, kind, mirrored):
     """Candidate URL where this PHP file would live on the target."""
     if mirrored:
@@ -183,17 +196,26 @@ def _try_verify_param(finding, url, param):
                                 "= came back UNESCAPED in the response body (reflected XSS)"}
 
     elif rule == "file-inclusion":
-        # /etc/passwd first: its content is unambiguous evidence (F-11)
-        for payload in ("../../../../etc/passwd",
-                        "php://filter/convert.base64-encode/resource=readme.html",
-                        "../../../../etc/hostname"):
+        # Every payload needs its OWN content signature - a body that merely
+        # DIFFERS from the baseline proves nothing (dynamic sidebars, CSRF
+        # nonces, timestamps all change bodies). Roadmap section 4.
+        for payload, signature in (
+                ("../../../../etc/passwd", lambda body: "root:" in body),
+                ("php://filter/convert.base64-encode/resource=readme.html",
+                 _base64_decodable),
+                ("../../../../etc/hostname",
+                 lambda body: bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.\-]{0,100}",
+                                                body.strip())))):
             resp = httpclient.get(url, params={param: payload}, retries=1)
-            if resp is None or resp.status_code != 200 or resp.text == baseline.text:
+            if resp is None or resp.status_code != 200:
                 continue
-            evidence = (f"request with ?{param}={payload} returned a DIFFERENT body "
-                        f"than the baseline request - server-side file content "
-                        f"influenced by the parameter (local file inclusion)")
-            if "passwd" in payload and "root:" in (resp.text or ""):
+            body = resp.text or ""
+            if not signature(body):
+                continue
+            evidence = (f"?{param}={payload} returned content matching its file "
+                        f"signature - server-side file content read through the "
+                        f"parameter (local file inclusion)")
+            if "passwd" in payload:
                 evidence = (f"?{param}={payload} returned actual /etc/passwd content "
                             f"(`root:` account lines) - confirmed local file inclusion")
             poc["params"] = {param: payload}

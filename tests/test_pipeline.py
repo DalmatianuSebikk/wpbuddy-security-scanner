@@ -3351,6 +3351,39 @@ def test_cli_deep_profile_scan(mock, tmp_path, monkeypatch):
     assert "(deep)" not in out.with_suffix(".md").read_text(encoding="utf-8")
 
 
+def test_poc_lfi_requires_content_signature(monkeypatch):
+    """A merely-DIFFERENT body no longer verifies LFI (roadmap section 4);
+    each payload needs its own content signature."""
+    from wpbuddy.codeaudit import poc
+    finding = {"rule": "file-inclusion", "params": ["page"],
+               "description": "lfi", "file": "y.php", "line": 1, "snippet": "s"}
+
+    def fake_get(url, params=None, retries=1, **kw):
+        if not params:
+            return FakeResp(200, "baseline")
+        # dynamic-looking body: DIFFERENT from baseline, no file signature
+        return FakeResp(200, f"page content {time.monotonic()}")
+
+    monkeypatch.setattr(httpclient, "get", fake_get)
+    assert poc.try_verify(finding, "https://x.example.com/y.php") is None
+
+    # php://filter output with valid base64 content DOES verify
+    import base64 as _b64
+    encoded = _b64.b64encode(b"<?php\n/**\n * Plugin Name: demo\n").decode()
+
+    def fake_get_b64(url, params=None, retries=1, **kw):
+        if not params:
+            return FakeResp(200, "baseline")
+        if "filter" in (params.get("page") or ""):
+            return FakeResp(200, encoded)
+        return FakeResp(200, "unrelated")
+
+    monkeypatch.setattr(httpclient, "get", fake_get_b64)
+    result = poc.try_verify(finding, "https://x.example.com/y.php")
+    assert result and result["verified"]
+    assert "file signature" in result["evidence"]
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:
