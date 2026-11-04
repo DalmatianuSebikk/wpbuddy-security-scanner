@@ -303,8 +303,11 @@ def run_flow(argv: list[str]) -> int:
                      "--target", args.target, *passthrough]
         command = " ".join(shlex.quote(part) for part in spawn_cmd)
         # the child resolves --runs-dir itself (config.RUNS_DIR in its own
-        # process); the watcher must follow the SAME root it will write to
-        root = audit_root(_flag_value(passthrough, "--runs-dir"))
+        # process, with ~ expanded by cli.py); the watcher must follow the
+        # SAME root it will write to - audit_root()'s explicit-base branch
+        # does not expanduser, so do it here to match the child.
+        raw_runs_dir = _flag_value(passthrough, "--runs-dir")
+        root = audit_root(Path(raw_runs_dir).expanduser() if raw_runs_dir else None)
         events_path, proc = _spawn_and_locate(spawn_cmd, host, root)
         if events_path is None:
             if proc.poll() is not None:

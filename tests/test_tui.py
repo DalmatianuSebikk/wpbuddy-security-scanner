@@ -811,6 +811,34 @@ def test_run_flow_watches_the_passthrough_runs_dir_for_a_live_scan(tmp_path, mon
     assert _FakeApp.instances[-1].board.stats()["status"] == "completed"
 
 
+def test_run_flow_expands_tilde_in_passthrough_runs_dir(tmp_path, monkeypatch):
+    from wpbuddy import config
+    from wpbuddy.tui import app as flow
+
+    home = tmp_path / "home"
+    (home / "my-runs").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))  # expanduser() reads HOME at call time
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()  # no literal './~/my-runs' here: only the expansion can match
+    monkeypatch.chdir(cwd)
+    monkeypatch.setattr(config, "RUNS_DIR", tmp_path / "default-root")
+    events = home / "my-runs" / "acme.test" / "runs" / "20261104-120000-abc" / "events.jsonl"
+
+    def fake_popen(cmd, **kwargs):
+        assert "~/my-runs" in cmd  # the child gets it verbatim, expands its own
+        return _FakePopen(cmd, events_path=events, events=_script(), **kwargs)
+
+    monkeypatch.setattr(flow.subprocess, "Popen", fake_popen)
+    _FakeApp.instances.clear()
+    _FakePopen.spawns.clear()
+    monkeypatch.setattr(flow, "FlowApp", _FakeApp)
+
+    assert flow.run_flow(["--target", "https://acme.test/",
+                          "--runs-dir", "~/my-runs"]) == 0
+    # the watcher expanded ~ exactly like the spawned scan will
+    assert _FakeApp.instances[-1].board.stats()["status"] == "completed"
+
+
 # --------------------------------------------------------- final fix wave
 
 class _CrashingApp(_FakeApp):
