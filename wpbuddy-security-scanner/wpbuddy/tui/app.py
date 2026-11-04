@@ -11,11 +11,16 @@ Two surfaces, one app: `LauncherScreen` (the entry screen `wpbuddy flow`
 with no arguments opens — pick a target and functionalities, or open a
 previous run) hands off to `ObservatoryScreen` (the single observation
 surface: top bar, phase rail, phase detail, findings plus their
-`#finding-detail` pane, event log, and the persistent `#notices` pane —
-no modes). `?` overlays the about pane, `c` copies the command that
+`#finding-detail` pane, the persistent `#notices` window under it, and
+the event log — no modes; the art.LOGO wordmark rides on top of tall
+terminals and a compact brand keeps the top bar when they are short).
+Both screens dress in the `phosphor` theme (green on near-black) and let
+the operator's terminal background show through wherever no pane sits.
+`?` overlays the about pane, `c` copies the command that
 produced the current state, `e` copies the last phase error (message +
 traceback), `tab` walks the panes, `q` quits (interrupting a live scan
-with SIGINT to its process group first).
+with SIGINT to its process group first). Notices never float: `notify()`
+records into the `#notices` window only, with no native toast.
 
 `run_flow` resolves the event source: `--run PATH` replays a recorded run,
 `--target URL` spawns a scan and tails its new run log, and anything else
@@ -40,7 +45,7 @@ from urllib.parse import urlsplit
 
 from .. import config
 from ..runs.store import audit_root
-from .art import LOGO
+from .art import LOGO, LOGO_COMPACT
 from .render import ScanBoard
 from .tail import follow, replay
 
@@ -50,6 +55,7 @@ try:  # the 'tui' extra; without it FlowApp stays importable but unusable
     from textual.containers import Horizontal, Vertical
     from textual.css.query import NoMatches
     from textual.screen import Screen
+    from textual.theme import Theme
     from textual.widgets import Button, Checkbox, Input, Label, ListItem, ListView, RichLog, Static
 except ImportError:  # pragma: no cover - only reachable without the extra
     App = object  # type: ignore[assignment,misc]
@@ -78,6 +84,29 @@ _GUARD_SIGNALS = tuple(getattr(signal, name) for name in ("SIGHUP", "SIGTERM")
 _PHASE_EVENTS = ("phase-started", "phase-finished", "phase-skipped", "phase-failed")
 # Events that move the top bar's numbers (requests count / run status).
 _TOPBAR_EVENTS = ("http-response", "run-started", "run-finished")
+# The wordmark shows only when it costs no panes: the 24-row pane budget
+# plus the logo's own rows. Shorter terminals keep the compact top-bar brand.
+_BRAND_MIN_HEIGHT = 24 + len(LOGO.splitlines())
+
+# The phosphor house theme: phosphor-green on near-black (CRT vibe), amber
+# warnings, red errors. Registered and activated on FlowApp mount so both
+# screens pick it up; per-widget CSS keeps using $variables ($accent, $panel,
+# $background) instead of hex so this object is the single source of color.
+PHOSPHOR = Theme(
+    name="phosphor",
+    primary="#3aff6e",      # phosphor green
+    secondary="#3aff6e",
+    accent="#7cffa5",       # brighter green for highlights
+    success="#3aff6e",
+    warning="#ffb000",      # amber
+    error="#ff5c57",        # red
+    foreground="#c8ffd8",   # soft green-white text
+    background="#0a0f0a",   # near-black, slightly green
+    surface="#0e150e",
+    panel="#162216",
+    boost="#1c2e1c",
+    dark=True,
+)
 
 
 def _finding_row(record: dict) -> str:
@@ -103,20 +132,34 @@ class FlowApp(App):
     """The flow app: an optional LauncherScreen entry, then the observatory."""
 
     CSS = """
+    /* Transparent backdrop: the screens never paint over the operator's own
+       terminal background; every content pane below carries its own dark
+       rgba (translucency cannot come from a $variable, so one literal,
+       rgb-matched to the theme background #0a0f0a, is shared by them all). */
+    Screen { background: transparent; }
     #header { height: 1; color: $accent; text-style: bold; }
-    #topbar { height: 1; }
-    #mid { height: 1fr; min-height: 13; }
+    #brand { height: auto; color: $accent; }  /* wordmark, hidden when short */
+    #topbar { height: 1; color: $accent; }  /* text-only: stays transparent */
+    # 80x24 budget (footer included): topbar 1 + #mid 18 + #log 4 + footer 1
+    # = 24; #mid's 18 rows split #right into detail 5 / findings 5 /
+    # finding-detail 4 / notices 4 (borders included), #rail spans all 18.
+    # Panes are 1fr + min-height; textual resolves them greedily, so taller
+    # terminals hand most spare rows to #log while #mid stays near its min.
+    #mid { height: 1fr; min-height: 18; }
     #rail { width: 38; border: round $panel; }
     #right { width: 1fr; }
-    #detail { height: 1fr; border: round $panel; padding: 0 1; }
-    #findings { height: 30%; border: round $panel; }
-    #finding-detail { height: auto; max-height: 8; border: round $panel; }
-    #log { height: 8; border: round $panel; }
-    #notices { height: 6; border: round $panel; }
+    #detail { height: 1fr; min-height: 5; border: round $panel; padding: 0 1; }
+    #findings { height: 1fr; min-height: 5; border: round $panel; }
+    #finding-detail { height: 1fr; min-height: 4; max-height: 8; border: round $panel; }
+    #notices { height: 1fr; min-height: 4; border: round $panel; }
+    #log { height: 1fr; min-height: 4; border: round $panel; }
+    #rail, #detail, #findings, #finding-detail, #notices, #log,
+    LauncherScreen #options, LauncherScreen #cycles,
+    LauncherScreen #previous { background: rgba(10, 15, 10, 0.85); }
     #about { layer: over; height: auto; max-height: 16;
              width: auto; max-width: 96%; border: thick $accent; padding: 0 1;
-             background: $surface; }
-    #footer { height: 1; color: $text-muted; }
+             background: $surface; }  /* solid: it floats OVER the panes */
+    #footer { height: 1; color: $text-muted; }  /* text-only: stays transparent */
     ObservatoryScreen { layers: base over; overflow-y: auto; }
     LauncherScreen { overflow-y: auto; }
     LauncherScreen #header { height: auto; }
@@ -156,9 +199,14 @@ class FlowApp(App):
         self._notices: collections.deque[str] = collections.deque(maxlen=50)
 
     def notify(self, message, *args, **kwargs) -> None:
-        """Keep notices on screen: record each one, then show the native toast."""
+        """Record the notice for the `#notices` pane — never a floating toast.
+
+        `super().notify()` is deliberately NOT called: the operator asked for
+        toasts to die, so notices live only in the pane (and its deque). The
+        extra kwargs (markup, severity, ...) stay accepted so existing callers
+        need no changes; they simply have no toast to configure anymore.
+        """
         self._notices.append(str(message))
-        super().notify(message, *args, **kwargs)
         try:  # paint from the UI thread only, after the current refresh
             self.call_after_refresh(self._refresh_notices)
         except RuntimeError:  # app not running yet / already shut down
@@ -169,6 +217,11 @@ class FlowApp(App):
         if self._launcher:
             return LauncherScreen()
         return ObservatoryScreen()
+
+    def on_mount(self) -> None:
+        """Dress both screens in the house theme."""
+        self.register_theme(PHOSPHOR)
+        self.theme = "phosphor"
 
     def _start_pump(self) -> None:
         """Start the event pump once, when an observatory screen mounts."""
@@ -303,7 +356,7 @@ class FlowApp(App):
         if self._topbar_dirty:
             stats = self.board.stats()
             self._pane("#topbar").update(
-                f"target {self.target} · profile {self.profile} · "
+                f"{LOGO_COMPACT} · target {self.target} · profile {self.profile} · "
                 f"requests {stats['requests']} · status {stats['status']}")
             self._topbar_dirty = False
         if self._rail_dirty:
@@ -419,9 +472,7 @@ class ObservatoryScreen(Screen):
     """The observation surface: every pane always mounted, no modes."""
 
     def compose(self):
-        app = self.app
-        yield Static(f"{LOGO.splitlines()[0]}  WpBuddy Flow — {app.target}",
-                     id="header", markup=False)
+        yield Static(LOGO.rstrip("\n"), id="brand", markup=False)  # hidden when short
         yield Static("", id="topbar", markup=False)
         with Horizontal(id="mid"):
             yield ListView(id="rail")
@@ -429,8 +480,8 @@ class ObservatoryScreen(Screen):
                 yield Static("", id="detail", markup=False)
                 yield ListView(id="findings")
                 yield Static("", id="finding-detail", markup=False)
+                yield RichLog(max_lines=50, id="notices", markup=False)
         yield RichLog(max_lines=_LOG_WINDOW, id="log")  # bounded retention
-        yield RichLog(max_lines=50, id="notices", markup=False)
         yield Static(ABOUT_TEXT, id="about", markup=False)
         yield Static(HINTS, id="footer", markup=False)
 
@@ -443,10 +494,20 @@ class ObservatoryScreen(Screen):
         self.query_one("#log", RichLog).border_title = "event log"
         self.query_one("#notices", RichLog).border_title = "notices"
         self.query_one("#rail", ListView).focus()  # ↑↓ drive the rail out of the box
+        self._sync_brand()  # the size may already be final at mount
         # App-level queries root at the CURRENT screen; while this screen is
         # being pushed the launcher is still current, so defer app work until
         # this screen actually is.
         self.call_after_refresh(self.app._observatory_ready)
+
+    def on_resize(self, event) -> None:
+        """Terminal height changed: the wordmark only rides along if it fits."""
+        self._sync_brand()
+
+    def _sync_brand(self) -> None:
+        """Show the wordmark exactly above the pane budget, hide it below."""
+        self.query_one("#brand", Static).display = \
+            self.size.height >= _BRAND_MIN_HEIGHT
 
 
 class LauncherScreen(Screen):

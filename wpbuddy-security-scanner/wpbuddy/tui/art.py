@@ -1,9 +1,10 @@
 """Shared artwork for WpBuddy's terminal surfaces.
 
 `LOGO` is the wordmark (pure ASCII, every line <= 78 columns) and
-`CLI_BANNER` pairs it with the scanner intro and the authorization
-disclaimer. The CLI's argparse description and the TUI splash both render
-from here so the surfaces never drift apart.
+`LOGO_COMPACT` is its one-line stand-in for height-starved surfaces (the
+observatory top bar). `CLI_BANNER` pairs the wordmark with the scanner intro
+and the authorization disclaimer. The CLI's argparse description and the TUI
+splash both render from here so the surfaces never drift apart.
 
 Logo provenance: generated with pyfiglet (figlet) in the `doom` font -
 regenerate with:
@@ -19,6 +20,9 @@ LOGO = r""" _    _      ______           _     _
        | |                             __/ |
        |_|                            |___/
 """
+
+# One-line brand for rows too short to spare the 8-line wordmark.
+LOGO_COMPACT = "WpBuddy"
 
 CLI_BANNER = LOGO + """
 

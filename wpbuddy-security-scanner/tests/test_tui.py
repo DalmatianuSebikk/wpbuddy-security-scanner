@@ -282,6 +282,15 @@ def test_logo_is_multiline_ascii_within_width():
         assert len(line) <= 78
 
 
+def test_logo_compact_is_a_short_ascii_brand():
+    from wpbuddy.tui.art import LOGO_COMPACT
+
+    assert LOGO_COMPACT.isascii()
+    assert LOGO_COMPACT == LOGO_COMPACT.strip()  # no padding surprises
+    assert 3 <= len(LOGO_COMPACT) <= 12  # fits any top bar, even 80 columns
+    assert "Buddy" in LOGO_COMPACT  # still says whose scan this is
+
+
 def test_cli_banner_pairs_logo_with_intro_and_disclaimer():
     from wpbuddy.tui.art import CLI_BANNER, LOGO
 
@@ -572,6 +581,19 @@ def _item_texts(widget):
     return [str(child.render()) for child in widget.children]
 
 
+def _painted(app):
+    """What the app actually PAINTED, as one string (rows concatenated).
+
+    `app.export_screenshot()` SVG is the only trustworthy source: a
+    Static.render() renderable is unclipped, so it can claim rows that never
+    made it to the screen. The SVG splits one screen row into several <text>
+    segments, so they are joined in document order, exactly as painted;
+    &#160; is the SVG's non-breaking space for a plain one.
+    """
+    segments = re.findall(r"<text[^>]*>(.*?)</text>", app.export_screenshot(), re.S)
+    return html.unescape("".join(segments)).replace("\xa0", " ")
+
+
 def test_flow_app_renders_a_recorded_run(tmp_path):
     from wpbuddy.tui.app import FlowApp
 
@@ -715,7 +737,32 @@ def test_finding_detail_survives_a_phase_event(tmp_path):
     asyncio.run(scenario())
 
 
-def test_observatory_notify_appears_in_the_notices_pane(tmp_path):
+def test_flow_app_applies_the_phosphor_dark_theme(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())
+    app = FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                  command="wpbuddy flow", target="acme.test")
+
+    async def scenario():
+        async with app.run_test():
+            await _settle(app)
+            assert app.theme == "phosphor"  # active on mount, app-wide
+            theme = app.current_theme
+            assert theme.dark is True
+            assert theme.primary == "#3aff6e"      # phosphor green
+            assert theme.accent == "#7cffa5"       # brighter green highlights
+            assert theme.success == "#3aff6e"
+            assert theme.background == "#0a0f0a"   # near-black, slightly green
+            assert theme.warning == "#ffb000"      # amber
+            assert theme.error == "#ff5c57"        # red
+            assert theme.foreground == "#c8ffd8"   # soft green-white text
+
+    asyncio.run(scenario())
+
+
+def test_observatory_notify_records_notice_without_toast(tmp_path):
     from wpbuddy.tui.app import FlowApp
 
     events = tmp_path / "events.jsonl"
@@ -730,13 +777,12 @@ def test_observatory_notify_appears_in_the_notices_pane(tmp_path):
             await pilot.pause()
             lines = [line.text for line in app.query_one("#notices").lines]
             assert any("hello operator" in line for line in lines), lines
-            assert any("hello operator" in note.message  # the native toast too
-                       for note in app._notifications)
+            assert list(app._notifications) == []  # no floating toast, ever
 
     asyncio.run(scenario())
 
 
-def test_launcher_notify_is_recorded_and_shown_after_mount(tmp_path, monkeypatch):
+def test_launcher_notify_is_recorded_and_shown_without_toast(tmp_path, monkeypatch):
     from wpbuddy import config
     from wpbuddy.tui import app as flow
 
@@ -749,8 +795,7 @@ def test_launcher_notify_is_recorded_and_shown_after_mount(tmp_path, monkeypatch
         async with app.run_test() as pilot:
             app.notify("target must be a URL", markup=False)  # no notices pane yet
             await pilot.pause()
-            assert any("target must be a URL" in note.message  # the toast showed
-                       for note in app._notifications)
+            assert list(app._notifications) == []  # recorded, not toasted
             app.open_run(run / "events.jsonl")
             await _settle(app)
             lines = [line.text for line in app.screen.query_one("#notices").lines]
@@ -807,8 +852,9 @@ def test_copy_error_with_nothing_failed_only_notifies(tmp_path):
             await pilot.press("e")
             await pilot.pause()
             assert copied == []  # nothing failed: the clipboard is untouched
-            assert any("no error to copy" in note.message
-                       for note in app._notifications)
+            lines = [line.text for line in app.query_one("#notices").lines]
+            assert any("no error to copy" in line for line in lines), lines
+            assert list(app._notifications) == []  # said in the pane, not a toast
 
     asyncio.run(scenario())
 
@@ -833,6 +879,88 @@ def test_observatory_panes_fit_an_80_by_24_terminal(tmp_path):
     asyncio.run(scenario())
 
 
+def test_observatory_shows_every_pane_including_notices_at_80_by_24(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())
+    app = FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                  command="wpbuddy flow", target="acme.test")
+
+    async def scenario():
+        async with app.run_test(size=(80, 24)) as pilot:
+            await _settle(app)
+            app.apply_event(_finding_event())  # a filled #finding-detail is tallest
+            await pilot.pause()
+            panes = {}
+            for pane_id in ("#topbar", "#rail", "#detail", "#findings",
+                            "#finding-detail", "#notices", "#log", "#footer"):
+                region = app.query_one(pane_id).region
+                panes[pane_id] = region
+                assert region.x >= 0 and region.x + region.width <= 80, (pane_id, region)
+                assert region.y >= 0 and region.y + region.height <= 24, (pane_id, region)
+            assert panes["#notices"].bottom <= panes["#log"].y  # never overlapping
+
+    asyncio.run(scenario())
+
+
+def test_observatory_paints_the_full_logo_when_tall_enough(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+    from wpbuddy.tui.art import LOGO
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())
+    app = FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                  command="wpbuddy flow", target="acme.test")
+
+    async def scenario():
+        async with app.run_test(size=(80, 32)):
+            await _settle(app)
+            painted = _painted(app)
+            for line in LOGO.splitlines():  # the whole wordmark is painted
+                assert line in painted, line
+            for pane_id in ("#topbar", "#rail", "#detail", "#findings",
+                            "#finding-detail", "#notices", "#log", "#footer"):
+                region = app.query_one(pane_id).region  # panes survive the logo
+                assert region.y >= 0 and region.y + region.height <= 32, (pane_id, region)
+
+    asyncio.run(scenario())
+
+
+def test_observatory_hides_the_logo_and_brands_the_topbar_when_short(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+    from wpbuddy.tui.art import LOGO, LOGO_COMPACT
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())
+
+    def observatory():
+        return FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                       command="wpbuddy flow", target="acme.test")
+
+    async def short_80_by_24():
+        app = observatory()
+        async with app.run_test(size=(80, 24)):
+            await _settle(app)
+            assert app.query_one("#brand").display is False  # 8 rows: no room
+            painted = _painted(app)
+            assert LOGO_COMPACT in painted  # the compact brand keeps the top bar
+            assert LOGO.splitlines()[-1] not in painted  # no wordmark bleeding
+
+    async def one_row_below_the_threshold():
+        app = observatory()  # a fresh app: an App instance runs exactly once
+        async with app.run_test(size=(80, 31)):
+            await _settle(app)
+            assert app.query_one("#brand").display is False
+            for pane_id in ("#topbar", "#rail", "#detail", "#findings",
+                            "#finding-detail", "#notices", "#log", "#footer"):
+                region = app.query_one(pane_id).region
+                assert region.y + region.height <= 31, (pane_id, region)
+
+    asyncio.run(short_80_by_24())
+    asyncio.run(one_row_below_the_threshold())
+
+
 def test_about_overlay_is_readable_at_80_by_24(tmp_path):
     from wpbuddy.tui.app import FlowApp
 
@@ -853,14 +981,9 @@ def test_about_overlay_is_readable_at_80_by_24(tmp_path):
             assert about.display is True
             assert region.y >= screen.y and region.bottom <= screen.bottom, region
             assert region.height - 2 >= 14  # every ABOUT_TEXT row fits inside
-            # what is actually PAINTED (the screenshot), not Static.render()'s
-            # unclipped renderable - a clipped-away hint must fail this. The
-            # SVG splits one screen row into several <text> segments, so they
-            # are joined in document order, exactly as painted; &#160; is the
-            # SVG's non-breaking space for a plain one.
-            segments = re.findall(r"<text[^>]*>(.*?)</text>",
-                                  app.export_screenshot(), re.S)
-            painted = html.unescape("".join(segments)).replace("\xa0", " ")
+            # what is actually PAINTED (see _painted), not Static.render()'s
+            # unclipped renderable - a clipped-away hint must fail this.
+            painted = _painted(app)
             assert "e copy error" in painted  # the full keys line survived the box
             assert "single-screen" in painted  # the description too
             await pilot.press("question_mark")
