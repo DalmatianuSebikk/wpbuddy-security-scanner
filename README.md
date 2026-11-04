@@ -34,9 +34,11 @@ python main.py --target https://example.com/ --user admin --via-xmlrpc       # +
 python main.py --target https://example.com/ --enum-plugins --verify-pocs    # + slug brute-force + live PoCs
 python main.py --target https://example.com/ --json                          # + machine-readable knowledge graph
 python main.py --target https://example.com/ --source-dir ~/licensed-zips    # + audit commercial/custom code you own
+python main.py --target https://example.com/ --profile deep                  # + aggressive read-only discovery
+python main.py --target https://example.com/ --offline                       # no internet: scan from the cached vuln DB
 ```
 
-Full options: `python main.py --help`
+Full options: `python main.py --help` (flat mode), or per subcommand: `wpbuddy scan|exploit|db|report|flow --help`
 
 | Phase | What it does |
 |---|---|
@@ -203,6 +205,36 @@ sitemap, REST API, `?author=` redirects, wp-login.php and xmlrpc.php - enough to
 exercise the whole pipeline without touching a real target.
 
 ## Changelog
+
+### v0.4.0
+
+The scanner grew from one flat command into a toolkit: a shared scan engine with a typed
+event log, CLI subcommands, a live TUI observatory, a hard-gated engagement model, an
+aggressive deep-discovery profile and the first exploitation stage - with the public
+review's result-breaking bug wave fully resolved.
+
+**Added**
+- **shared scan engine + typed event log**: one phase graph drives CLI and TUI; `--plan` (resolved phases + explicit skip reasons, sends no requests) and `--explain` annotate every decision; every run appends to an **append-only run store** (`meta.json` + `events.jsonl`) with a replay iterator
+- **CLI subcommands** - `wpbuddy scan`, `wpbuddy exploit`, `wpbuddy db`, `wpbuddy report diff`, `wpbuddy flow`; the flat flag form (`python main.py --target ...`) stays valid
+- **Flow TUI** (`pip install 'wpbuddy[tui]'`): single-screen live observatory (live scan or replay); `wpbuddy flow` opens a **launcher** - type a target, tick functionalities, or pick a previous run; runs record under `~/.wpbuddy/previous-runs/` regardless of CWD (`--runs-dir` to relocate)
+- **engagement model** - `--authorization`, `--exclude-path`, `--allow-effect`, `--max-requests`, `--max-time`: write effects are hard-gated and budgets stop the scan instead of warning
+- **`--profile deep`** - aggressive read-only discovery: recursive crawl + JS/form mining, REST route inventory, a content-discovery mutation engine, async request pool with AIMD pacing
+- **exploit engine starter** (`wpbuddy exploit`): template-driven, evidence tiers `reachable` -> `payload-sent` -> `signal-observed` -> `artifact`, evidence artifacts per run, plan-first gates before anything fires
+- **local vulnerability DB cache**: `--offline` scans from a primed cache; `wpbuddy db status|update` shows and refreshes it
+- **risk scoring + Remediation priorities + executive summary**: findings ranked by score, a prioritized fix list, a one-paragraph overview; `--diff` compares two report runs, `--fail-on` gates CI, `--suppressions` silences reviewed findings
+- **authenticated mode**: `--cookie` / `--app-password` for scanning behind wp-login
+- **mirror-vs-official integrity check**: files deployed on the target compared against the official wordpress.org distribution (defacement/webshell detection)
+- **asset `?ver=` version detection**: component versions read from static-asset query strings when readmes are unreadable
+- **bundled-dependency SCA**: known-vulnerable libraries shipped inside plugins/themes, found in gathered sources
+- **malware/webshell/secret scan**: gathered sources checked for malicious patterns and leaked credentials
+- **TLS / DNS / email posture**: certificate protocol version and expiry, SPF/DMARC/CAA of the registrable domain
+- **extra checks**: wp-cron exposure, leftover install/upgrade pages, REST CORS reflection, login cookie flags, unauthenticated admin-ajax heartbeat
+- **PoC verifier hardening**: content signatures instead of bare status codes, multi-parameter payloads, a per-PoC time budget
+- **optional Semgrep pack** (`--semgrep`): the analyzer's rules as a configurable Semgrep pass
+- `--timestamp-output`, `--mask-secrets`, a `schema` field in the JSON graph, more wp-config leak variants (`.bak`, `~`, `.save`, `.txt`, `.copy`, ...)
+
+**Changed**
+- the public review's result-breaking wave is fixed - **all P0-P2 items in issues.md are resolved**: target URLs normalized (query/fragment stripped, root-path fallback), `--stealth` no longer probes target listings, cached audit sources keep their mirror semantics (`.origin` marker), a vulnerability-DB outage reports "lookup failed" instead of "no vulnerabilities", every NVD CPE range is evaluated (not only the first), `preg /e` inside single-quoted patterns is detected, apex/www/subdomain hosts match in WAF and error-page collection - plus the false-positive and report-shape fixes (junk-page filtering, challenge-aware slug checks, HSTS not flagged on plain HTTP, 2FA-safe login detection, numbered lists, validated CLI numbers, and more)
 
 ### v0.3.0
 
