@@ -2687,6 +2687,16 @@ def test_posture_parsers():
     assert posture._days_left("not a date") is None
 
 
+def test_tls_issuer_string():
+    """getpeercert() returns RDNs of (key, value) pairs; only values are shown."""
+    from wpbuddy.passive.posture import _issuer_string
+
+    assert _issuer_string(((('countryName', 'US'),),
+                           (('organizationName', "Let's Encrypt"),),
+                           (('commonName', 'R11'),))) == "US, Let's Encrypt, R11"
+    assert _issuer_string(()) == ""
+
+
 def test_posture_report_rendering(monkeypatch):
     """The section renders cert expiry, weak DMARC and missing-SPF findings
     from stubbed lookups; a dead TLS handshake never crashes it."""

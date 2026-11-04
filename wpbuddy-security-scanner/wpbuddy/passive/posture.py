@@ -71,6 +71,12 @@ def _days_left(not_after):
     return (expiry.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).days
 
 
+def _issuer_string(rdns) -> str:
+    """Render an SSL issuer RDN structure as a display string."""
+    # getpeercert() gives RDN tuples of (key, value) pairs, so join the values.
+    return ", ".join(kv[1] for rdn in rdns for kv in rdn)
+
+
 def _tls_facts(host, timeout=5.0):
     """Protocol/expiry facts from one TLS handshake, or None when it fails."""
     try:
@@ -84,7 +90,7 @@ def _tls_facts(host, timeout=5.0):
     return {
         "protocol": protocol,
         "days_left": _days_left(cert.get("notAfter")),
-        "issuer": ", ".join(v for part in cert.get("issuer", ()) for v in part[::2]),
+        "issuer": _issuer_string(cert.get("issuer", ())),
     }
 
 
