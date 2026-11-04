@@ -222,3 +222,34 @@ def test_follow_polls_for_a_missing_file_and_returns_once_stop_is_set(tmp_path):
     stop = threading.Event()
     stop.set()  # already asked to stop: no file, no events, no hang
     assert list(follow(tmp_path / "nope.jsonl", stop, poll=0.01)) == []
+
+
+# -------------------------------------------------------------- shared art
+
+def test_logo_is_multiline_ascii_within_width():
+    from wpbuddy.tui.art import LOGO
+
+    lines = LOGO.splitlines()
+    assert len(lines) >= 5
+    for line in lines:
+        assert line.strip(), "logo must have at least 5 non-blank lines"
+        assert line.isascii()
+        assert len(line) <= 78
+
+
+def test_cli_banner_pairs_logo_with_intro_and_disclaimer():
+    from wpbuddy.tui.art import CLI_BANNER, LOGO
+
+    assert LOGO in CLI_BANNER
+    assert "WpBuddy - WordPress vulnerability scanner" in CLI_BANNER
+    assert "An open-source vulnerability scanner for websites using WordPress." in CLI_BANNER
+    assert "- this project is related to Website Security and must not be used\n" \
+        "  for malicious activities." in CLI_BANNER
+    assert "- never scan a website you do not own or are not authorized to test." in CLI_BANNER
+
+
+def test_cli_reuses_the_shared_banner_object():
+    import wpbuddy.cli as cli
+    from wpbuddy.tui import art
+
+    assert cli.BANNER is art.CLI_BANNER

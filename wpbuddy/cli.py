@@ -11,6 +11,7 @@ from . import __version__, confidence, config, httpclient
 from .engagement import EFFECTS, Budget, Engagement
 from .engine import reporting
 from .report import Report
+from .tui.art import CLI_BANNER as BANNER
 
 # Backwards-compatible private aliases (the helpers used to live in this file).
 _BAND_ORDER = reporting.BAND_ORDER
@@ -20,28 +21,6 @@ _suppressed = reporting.suppressed
 _write_diff_section = reporting.write_diff_section
 _write_exec_summary = reporting.write_exec_summary
 _write_priorities = reporting.write_priorities
-
-BANNER = """
-    ██╗    ██╗    ██╗
-    ██║    ╚██╗   ██║
-    ██║     ╚██╗ ██╔╝
-    ██║      ╚████╔╝
-    ██║       ╚██╔╝
-    ╚═╝        ╚═╝
-    WpBuddy - WordPress vulnerability scanner
-    ------------------------------------------------------------------
-    An open-source vulnerability scanner for websites using WordPress.
-    Identifies and matches vulnerabilities for the core version and for
-    plugins/themes, tests weak credentials, and audits component source
-    code locally. Passive, active (stealthy/invasive) and code-audit
-    phases can be tuned from the CLI.
-
-    Disclaimer:
-    - this project is related to Website Security and must not be used
-      for malicious activities.
-    - never scan a website you do not own or are not authorized to test.
-    ------------------------------------------------------------------
-"""
 
 
 def build_parser():
