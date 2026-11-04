@@ -270,12 +270,17 @@ def _run_db_command(argv):
 # roadmap §2.2 - the CLI splits into subcommands; the historic flat flag
 # interface keeps working (it IS the scan subcommand) so no operator script
 # or test breaks. post/lab land with their roadmap stages.
-SUBCOMMANDS = ("scan", "exploit", "post", "db", "report", "lab")
+SUBCOMMANDS = ("scan", "exploit", "post", "db", "report", "lab",
+               "flow", "tui", "explain")
 
 _SUBCOMMAND_HELP = """------------------------------------------------------------------
 Subcommands (roadmap section 2.2) - the flat flag interface stays valid
 and is equivalent to 'wpbuddy scan':
   wpbuddy scan --target URL [flags]   passive + active + code audit scan
+  wpbuddy flow [--target URL | --run PATH]
+                                      single-screen live flow observatory
+                                      (needs the tui extra; 'tui' and
+                                      'explain' are aliases)
   wpbuddy exploit --target URL        exploitation engine (plan-first)
   wpbuddy post cleanup --run ID       replay a run's cleanup log
   wpbuddy db status|update            local vulnerability cache (F-1)
@@ -288,6 +293,9 @@ def _dispatch_subcommand(name, argv):
     from . import exploit as exploit_cmd
     if name == "scan":
         _cmd_scan(argv)
+    elif name in ("flow", "tui", "explain"):
+        from .tui.app import run_flow
+        sys.exit(run_flow(argv))
     elif name == "exploit":
         exploit_cmd.main(argv)
     elif name == "db":

@@ -14,12 +14,14 @@ dependencies = [
 [project.optional-dependencies]
 # --covert: impersonates a real browser's TLS fingerprint and HTTP/2
 covert = ["curl-cffi>=0.7"]
+# wpbuddy flow: the single-screen Textual observatory
+tui = ["textual>=0.60"]
 
 [project.scripts]
 wpbuddy = "wpbuddy.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+dev = ["pytest>=8.0", "ruff>=0.6", "textual>=0.60"]
 
 [build-system]
 requires = ["hatchling"]

@@ -8,8 +8,17 @@ The sources (`wpbuddy.tui.tail`) read those event dicts out of a run's
 everything here is unit-testable without a terminal.
 """
 
+import ast
+import asyncio
 import json
+import os
+import signal
+import sys
 import threading
+import time
+from pathlib import Path
+
+import pytest
 
 from wpbuddy.engine.phases import PhaseSpec, default_graph
 from wpbuddy.tui.render import ScanBoard
@@ -253,3 +262,336 @@ def test_cli_reuses_the_shared_banner_object():
     from wpbuddy.tui import art
 
     assert cli.BANNER is art.CLI_BANNER
+
+
+# ------------------------------------------------------------ flow screen
+#
+# The Textual shell (`wpbuddy.tui.app`) is tested twice over: once through
+# Textual's headless pilot (`asyncio.run` + `app.run_test()` — no real
+# terminal, no pytest-asyncio), and once through fakes for `FlowApp` and
+# `subprocess.Popen` so the live-scan mechanics (spawn, tail, interrupt)
+# never start a real scan. Textual itself is only ever imported by
+# `wpbuddy/tui/app.py`; these tests import it transitively, never directly.
+
+
+def _write_events(path, events):
+    """Write an events.jsonl exactly the way a recorded run leaves it."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(event) + "\n" for event in events),
+                    encoding="utf-8")
+
+
+class _FakeApp:
+    """FlowApp double: drains the event source into the board, records itself."""
+
+    instances = []
+
+    def __init__(self, source=None, board=None, command="", **kwargs):
+        self.source = source
+        self.board = board
+        self.command = command
+        self.kwargs = kwargs
+        _FakeApp.instances.append(self)
+
+    def run(self):
+        for event in self.source():
+            self.board.apply(event)
+        return 0
+
+
+class _FakePopen:
+    """Popen double: never spawns; can write the run log and/or stay 'running'."""
+
+    spawns = []
+
+    def __init__(self, cmd, events_path=None, events=None, running=False, **kwargs):
+        self.cmd = list(cmd)
+        self.kwargs = kwargs
+        self.pid = 4242
+        self.signals = []
+        self.returncode = None if running else 0
+        if events_path is not None:
+            _write_events(events_path, events or _script())
+        _FakePopen.spawns.append(self)
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode if self.returncode is not None else -9
+
+    def send_signal(self, sig):
+        self.signals.append(sig)
+
+    def terminate(self):
+        self.signals.append(signal.SIGTERM)
+
+    def kill(self):
+        self.signals.append(signal.SIGKILL)
+        self.returncode = -9
+
+
+# ------------------------------------------------------ subcommand plumbing
+
+def test_flow_subcommand_and_aliases_are_dispatched(tmp_path, monkeypatch):
+    from wpbuddy import cli
+    from wpbuddy.tui import app as flow
+
+    assert {"flow", "tui", "explain"} <= set(cli.SUBCOMMANDS)
+    monkeypatch.setattr(flow, "textual_available", lambda: False)
+    monkeypatch.setattr(flow, "FlowApp",
+                        lambda *a, **k: pytest.fail("no app may run in this test"))
+    for name in ("flow", "tui", "explain"):
+        with pytest.raises(SystemExit) as caught:
+            cli.main([name, "--run", str(tmp_path / "missing.jsonl")])
+        assert caught.value.code == 2
+
+
+def test_textual_available_is_find_spec_based(monkeypatch):
+    import importlib.util
+
+    from wpbuddy.tui import app as flow
+
+    assert flow.textual_available() == (importlib.util.find_spec("textual") is not None)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    assert flow.textual_available() is False
+
+
+def test_textual_is_imported_only_by_the_tui_app_module():
+    import wpbuddy
+
+    root = Path(wpbuddy.__file__).parent
+
+    def imports_textual(path):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import) and \
+                    any(alias.name.split(".")[0] == "textual" for alias in node.names):
+                return True
+            if isinstance(node, ast.ImportFrom) and \
+                    (node.module or "").split(".")[0] == "textual":
+                return True
+        return False
+
+    offenders = [str(p.relative_to(root)) for p in root.rglob("*.py")
+                 if p != root / "tui" / "app.py" and imports_textual(p)]
+    assert offenders == []
+
+
+# ------------------------------------------------------- source resolution
+
+def test_run_flow_with_a_bad_run_path_exits_2(tmp_path, capsys, monkeypatch):
+    from wpbuddy.tui import app as flow
+
+    monkeypatch.setattr(flow, "FlowApp",
+                        lambda *a, **k: pytest.fail("a bad --run must not launch the app"))
+    assert flow.run_flow(["--run", str(tmp_path / "nope.jsonl")]) == 2
+    assert "run log not found" in capsys.readouterr().out
+    assert flow.run_flow(["--run", str(tmp_path)]) == 2  # directory without events.jsonl
+
+
+def test_run_flow_replays_a_recorded_run_file_or_directory(tmp_path, monkeypatch):
+    from wpbuddy.tui import app as flow
+
+    run = tmp_path / "wpbuddy-audit" / "acme.test" / "runs" / "20261104-120000-abc"
+    _write_events(run / "events.jsonl", _script())
+    (run / "meta.json").write_text(json.dumps({"target": "https://acme.test/"}),
+                                   encoding="utf-8")
+    _FakeApp.instances.clear()
+    monkeypatch.setattr(flow, "FlowApp", _FakeApp)
+
+    assert flow.run_flow(["--run", str(run / "events.jsonl")]) == 0
+    app = _FakeApp.instances[-1]
+    assert app.command == f"wpbuddy flow --run {run / 'events.jsonl'}"
+    assert app.kwargs["target"] == "acme.test"  # target read from the run's meta.json
+    assert app.board.stats()["status"] == "completed"
+
+    assert flow.run_flow(["--run", str(run)]) == 0  # a run directory resolves too
+    assert _FakeApp.instances[-1].command.endswith("events.jsonl")
+
+
+def test_run_flow_defaults_to_the_newest_recorded_run(tmp_path, monkeypatch):
+    from wpbuddy.tui import app as flow
+
+    monkeypatch.chdir(tmp_path)
+    older = tmp_path / "wpbuddy-audit" / "old.test" / "runs" / "run-old"
+    newer = tmp_path / "wpbuddy-audit" / "new.test" / "runs" / "run-new"
+    _write_events(older / "events.jsonl", _script())
+    _write_events(newer / "events.jsonl", _script())
+    os.utime(older / "events.jsonl", (1, 1))
+    os.utime(newer / "events.jsonl", (2, 2))
+    _FakeApp.instances.clear()
+    monkeypatch.setattr(flow, "FlowApp", _FakeApp)
+
+    assert flow.run_flow([]) == 0
+    command = _FakeApp.instances[-1].command
+    assert "new.test" in command and "run-new" in command  # newest wins
+    assert "old.test" not in command
+
+
+def test_run_flow_with_no_target_and_no_runs_exits_2(tmp_path, monkeypatch, capsys):
+    from wpbuddy.tui import app as flow
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(flow, "FlowApp",
+                        lambda *a, **k: pytest.fail("nothing to show, nothing to run"))
+    assert flow.run_flow([]) == 2
+    assert "no recorded runs found - pass --target or --run" in capsys.readouterr().out
+
+
+def test_run_flow_without_textual_hints_and_spawns_nothing(monkeypatch, tmp_path, capsys):
+    from wpbuddy.tui import app as flow
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())
+
+    def no_app(*args, **kwargs):
+        raise AssertionError("the app must not run without textual")
+
+    def no_spawn(*args, **kwargs):
+        raise AssertionError("no scan may be spawned without textual")
+
+    monkeypatch.setattr(flow, "textual_available", lambda: False)
+    monkeypatch.setattr(flow, "FlowApp", no_app)
+    monkeypatch.setattr(flow.subprocess, "Popen", no_spawn)
+
+    assert flow.run_flow(["--run", str(events)]) == 2
+    assert "pip install 'wpbuddy[tui]'" in capsys.readouterr().out
+    assert flow.run_flow(["--target", "https://acme.test/"]) == 2
+    assert "pip install 'wpbuddy[tui]'" in capsys.readouterr().out
+
+
+# ------------------------------------------------------ live-scan mechanics
+
+def test_run_flow_spawns_the_scan_and_tails_the_new_run(tmp_path, monkeypatch):
+    from wpbuddy.tui import app as flow
+
+    monkeypatch.chdir(tmp_path)
+    events = tmp_path / "wpbuddy-audit" / "acme.test" / "runs" / \
+        "20261104-120000-abc" / "events.jsonl"
+
+    def fake_popen(cmd, **kwargs):
+        return _FakePopen(cmd, events_path=events, events=_script(), **kwargs)
+
+    monkeypatch.setattr(flow.subprocess, "Popen", fake_popen)
+    _FakeApp.instances.clear()
+    _FakePopen.spawns.clear()
+    monkeypatch.setattr(flow, "FlowApp", _FakeApp)
+
+    assert flow.run_flow(["--target", "https://acme.test/", "--profile", "deep"]) == 0
+
+    spawn = _FakePopen.spawns[0]
+    assert spawn.cmd == [sys.executable, "-m", "wpbuddy.cli", "scan",
+                         "--target", "https://acme.test/", "--profile", "deep"]
+    assert spawn.kwargs.get("start_new_session") is True  # own process group
+    app = _FakeApp.instances[-1]
+    assert app.board.log_tail()  # tailed the new run's events.jsonl
+    assert app.board.stats()["status"] == "completed"
+    assert app.kwargs["profile"] == "deep"
+
+
+def test_run_flow_sends_sigint_to_the_child_group_at_quit(tmp_path, monkeypatch):
+    from wpbuddy.tui import app as flow
+
+    monkeypatch.chdir(tmp_path)
+    events = tmp_path / "wpbuddy-audit" / "acme.test" / "runs" / \
+        "20261104-120000-abc" / "events.jsonl"
+    sent = []
+
+    def fake_popen(cmd, **kwargs):
+        return _FakePopen(cmd, events_path=events, events=_script(),
+                          running=True, **kwargs)
+
+    monkeypatch.setattr(flow.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(flow.os, "killpg",
+                        lambda pgid, sig: sent.append((pgid, sig)))
+    monkeypatch.setattr(flow, "_INTERRUPT_GRACE", 0.05)
+    _FakeApp.instances.clear()
+    _FakePopen.spawns.clear()
+    monkeypatch.setattr(flow, "FlowApp", _FakeApp)
+
+    assert flow.run_flow(["--target", "https://acme.test/"]) == 0
+    child = _FakePopen.spawns[-1]
+    assert (child.pid, signal.SIGINT) in sent  # SIGINT goes to the process group
+    assert sent[-1] == (child.pid, signal.SIGKILL)  # then SIGKILL once grace expires
+
+
+# ---------------------------------------------------------- the app itself
+
+async def _settle(app, seconds=5.0):
+    """Wait (without blocking the loop) for the pump thread to finish feeding."""
+    deadline = time.monotonic() + seconds
+    while not app.source_done.is_set() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+    assert app.source_done.is_set(), "the event pump did not finish"
+    await asyncio.sleep(0.02)  # let the last refresh land
+
+
+def _item_texts(widget):
+    """Rendered text of the child widgets inside one pane widget."""
+    return [str(child.render()) for child in widget.children]
+
+
+def test_flow_app_renders_a_recorded_run(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())
+    app = FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                  command=f"wpbuddy flow --run {events}", target="acme.test")
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await _settle(app)
+            rail = app.query_one("#rail")
+            rows = [text for item in rail.children for text in _item_texts(item)]
+            assert any("✓" in row and "liveness" in row for row in rows), rows
+            assert any("⊘" in row and "deep-discovery" in row for row in rows), rows
+            detail = str(app.query_one("#detail").render())
+            assert "verify the target answers" in detail  # selected phase's purpose
+            topbar = str(app.query_one("#topbar").render())
+            assert "acme.test" in topbar and "requests" in topbar
+            assert app.log_lines_rendered == len(_script())
+            assert app.query_one("#log").lines  # the log pane painted something
+
+            before = len(rail.children)
+            app.apply_event(_event("phase-started", "ghost-phase"))  # unknown phase
+            await pilot.pause()
+            assert len(app.query_one("#rail").children) == before  # ignored, no crash
+
+    asyncio.run(scenario())
+
+
+def test_flow_app_bindings_copy_about_and_quit(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())
+    assert {"q", "c", "question_mark"} <= {binding.key for binding in FlowApp.BINDINGS}
+
+    app = FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                  command=f"wpbuddy flow --run {events}", target="acme.test")
+    copied = []
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await _settle(app)
+            app.copy_to_clipboard = copied.append  # shim over the App method
+            about = app.query_one("#about")
+            assert about.display is False
+            await pilot.press("question_mark")
+            await pilot.pause()
+            assert about.display is True
+            assert "single-screen" in str(about.render())  # about pane describes the app
+            await pilot.press("c")
+            await pilot.pause()
+            assert copied == [app.command]  # copies the spawn command
+            await pilot.press("q")
+            for _ in range(100):  # quit must actually stop the app
+                if not app.is_running:
+                    break
+                await asyncio.sleep(0.02)
+            assert not app.is_running
+
+    asyncio.run(scenario())
