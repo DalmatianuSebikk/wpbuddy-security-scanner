@@ -3457,8 +3457,12 @@ def test_exploit_plan_mode_shows_requests_without_sending(mock, capsys):
 
 def test_exploit_cli_executes_and_records(mock, tmp_path, monkeypatch, capsys):
     """--yes executes read-only lab templates, escalates tiers, records the
-    run (engagement + evidence artifacts)."""
+    run (engagement + evidence artifacts) under the runs root."""
+    from wpbuddy import config
+
     monkeypatch.chdir(tmp_path)
+    runs_root = tmp_path / "runs"
+    monkeypatch.setattr(config, "RUNS_DIR", runs_root)
     from wpbuddy import exploit as exploit_cmd
 
     with pytest.raises(SystemExit) as exc:
@@ -3467,9 +3471,9 @@ def test_exploit_cli_executes_and_records(mock, tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "[artifact]" in out
     assert "Exploit run recorded" in out
-    artifacts = list(tmp_path.glob("wpbuddy-audit/*/runs/*-exploit/artifacts/*"))
+    artifacts = list(runs_root.glob("*/runs/*-exploit/artifacts/*"))
     assert any("lab-lfi-wpconfig-read" in str(p) for p in artifacts)
-    engagements = list(tmp_path.glob("wpbuddy-audit/*/runs/*-exploit/engagement.json"))
+    engagements = list(runs_root.glob("*/runs/*-exploit/engagement.json"))
     assert len(engagements) == 1
 
 

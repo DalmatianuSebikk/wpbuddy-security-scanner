@@ -26,7 +26,7 @@ def audit_root(base=None):
     """Explicit base wins, then config.RUNS_DIR (`~` expanded; None = the
     legacy CWD-relative wpbuddy-audit/)."""
     if base:
-        return Path(base)
+        return Path(base).expanduser()
     runs_dir = getattr(config, "RUNS_DIR", None)
     if runs_dir is not None:
         return Path(runs_dir).expanduser()

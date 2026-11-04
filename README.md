@@ -45,8 +45,10 @@ Full options: `python main.py --help`
 | **Access assessment** (`--access` / `--user`) | quiet alternatives to brute force: open-registration check (if registration is open, that *is* access), login-error differential to confirm which usernames are real, then a **targeted password spray** - a dozen high-probability candidates (target-derived `{host}{year}!` templates + top leaked passwords), one attempt per user per round, staying under lockout thresholds. `--via-xmlrpc` folds an entire spray round (N users) into ONE `system.multicall` request. The loud full-dictionary path still exists behind `--dict` |
 | **Code audit** | mirrors component source from exposed directory listings (itself a finding) or downloads the exact detected version from the official wordpress.org distribution (never touches the target), then runs a pattern-based PHP analyzer (webshell patterns, SQLi, command exec, file inclusion, SSRF, reflected XSS, missing nonces). With `--verify-pocs`, findings become evidence: safely-testable rules are **reproduced live on the target** with benign payloads (reflected-XSS marker, harmless LFI file, error-based SQL probe). Every exploitable finding is written to a **Burp-ready PoC pack** |
 
-The report is written as Markdown (default `outputScan.md`); gathered sources and audit
-evidence land in `wpbuddy-audit/<host>/` for manual review. With `--json`, the scan also
+The report is written as Markdown (default `outputScan.md`); gathered code-audit
+sources and the PoC pack land in CWD `wpbuddy-audit/<host>/` for manual review, while
+run timelines and run evidence record under the runs root (`--runs-dir`, default
+`~/.wpbuddy/previous-runs/`). With `--json`, the scan also
 produces `<output>.json` - a knowledge graph of the site (see below).
 
 ## Flow observatory (TUI)
@@ -174,8 +176,10 @@ tests/                  mock WordPress site + pytest suite (runs offline)
 ### Inspecting a run
 
 The CLI and the TUI share one phase graph (`wpbuddy/engine/phases.py`).
-Every run appends typed events to `wpbuddy-audit/<host>/runs/<run_id>/events.jsonl`
-(disable with `--no-run-log`) and records `meta.json` next to it.
+Every run appends typed events to `<runs-dir>/<host>/runs/<run_id>/events.jsonl`
+(`--runs-dir`, default `~/.wpbuddy/previous-runs/`; disable with `--no-run-log`)
+and records `meta.json` next to it. Runs recorded before the stable runs root
+(under CWD `wpbuddy-audit/`) remain openable with `wpbuddy flow --run <path>`.
 
 ```bash
 python main.py --target https://example.com/ --plan       # resolved phases + skip reasons

@@ -35,6 +35,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .. import config
 from ..runs.store import audit_root
 from .art import LOGO
 from .render import ScanBoard
@@ -106,12 +107,13 @@ class FlowApp(App):
     ]
 
     def __init__(self, source=None, board=None, command="", target="scan",
-                 profile="safe", stop_event=None, launcher=False):
+                 profile="safe", stop_event=None, launcher=False, runs_dir=None):
         super().__init__()
         self._source = source  # zero-arg callable returning an event iterator
         self._launcher = launcher
         self._pump_started = False
         self.launched_proc = None  # set when the launcher spawns a scan
+        self.runs_dir = runs_dir  # explicit --runs-dir: list + spawn follow it
         self.board = board if board is not None else ScanBoard()
         self.command = command  # what `c` copies: the spawn cmd / replay cmd
         self.target = target
@@ -141,6 +143,10 @@ class FlowApp(App):
         """The observatory screen is current: paint it and start the pump."""
         self.refresh_panes()
         self._start_pump()
+
+    def _launch_root(self) -> Path:
+        """The root a launcher session lists from and records into."""
+        return self.runs_dir if self.runs_dir is not None else runs_root()
 
     def _observatory(self):
         """The mounted observatory screen, if any (there is at most one).
@@ -173,7 +179,7 @@ class FlowApp(App):
                         markup=False, severity="error")
             return
         spawn_cmd = [sys.executable, "-m", "wpbuddy.cli", "scan", *flags]
-        events_path, proc = _spawn_and_locate(spawn_cmd, host, runs_root())
+        events_path, proc = _spawn_and_locate(spawn_cmd, host, self._launch_root())
         self.launched_proc = proc
         if events_path is None:
             if proc.poll() is not None:
@@ -405,9 +411,9 @@ class LauncherScreen(Screen):
         self._sync_command()  # `c` copies `wpbuddy scan` from the very start
 
     def _refresh_runs(self) -> None:
-        """List every run under the runs root, newest first (or the empty state)."""
+        """List every run under the launch root, newest first (or empty state)."""
         view = self.query_one("#previous", ListView)
-        runs = _recorded_runs(runs_root())
+        runs = _recorded_runs(self.app._launch_root())
         self.runs = [path for path, _count in runs]
         if runs:
             items = [ListItem(Label(_run_label(path, count), markup=False))
@@ -435,6 +441,8 @@ class LauncherScreen(Screen):
             argv += ["--audit-code", self.audit_mode]
         if self.fail_gate != "none":  # at the CLI default: absent
             argv += ["--fail-on", self.fail_gate]
+        if self.app.runs_dir is not None:  # honor the session's --runs-dir
+            argv += ["--runs-dir", str(self.app.runs_dir)]
         return argv
 
     def _sync_command(self) -> None:
@@ -493,9 +501,9 @@ def run_flow(argv: list[str]) -> int:
     parser.add_argument("--target", help="scan this URL now and tail its new run log")
     parser.add_argument("--run", metavar="PATH",
                         help="replay this events.jsonl (or the run directory holding it)")
-    # every other flag (e.g. --profile, --stealth, --audit-code, --pluginList,
-    # --json, --max-pages, --offline, --output) is forwarded to the scan
-    # subprocess verbatim; only --run is flow's own.
+    # passthrough flags are forwarded verbatim to the scan when --target
+    # spawns one; in launcher mode only --runs-dir is honored (the launcher's
+    # controls own every other flag) and the rest get a one-line notice.
     args, passthrough = parser.parse_known_args(argv)
 
     if not textual_available():
@@ -532,11 +540,9 @@ def run_flow(argv: list[str]) -> int:
                      "--target", args.target, *passthrough]
         command = " ".join(shlex.quote(part) for part in spawn_cmd)
         # the child resolves --runs-dir itself (config.RUNS_DIR in its own
-        # process, with ~ expanded by cli.py); the watcher must follow the
-        # SAME root it will write to - audit_root()'s explicit-base branch
-        # does not expanduser, so do it here to match the child.
-        raw_runs_dir = _flag_value(passthrough, "--runs-dir")
-        root = audit_root(Path(raw_runs_dir).expanduser() if raw_runs_dir else None)
+        # process); audit_root() expands `~`, so the watcher follows the
+        # SAME root the child will write to.
+        root = audit_root(_flag_value(passthrough, "--runs-dir"))
         events_path, proc = _spawn_and_locate(spawn_cmd, host, root)
         if events_path is None:
             if proc.poll() is not None:
@@ -560,7 +566,15 @@ def run_flow(argv: list[str]) -> int:
                       command=f"wpbuddy flow --run {events_path}",
                       target=target, profile=profile or "safe", stop_event=stop_event)
     else:  # the entry screen: launcher picks a target or a previous run
-        app = FlowApp(launcher=True, board=ScanBoard(), stop_event=stop_event)
+        raw_runs_dir = _flag_value(passthrough, "--runs-dir")
+        if raw_runs_dir:  # the previous-runs list and every launch follow it
+            config.RUNS_DIR = Path(raw_runs_dir).expanduser()
+        ignored = _strip_flag(passthrough, "--runs-dir")
+        if ignored:
+            print("[!] ignoring passthrough flag(s) in launcher mode "
+                  "(the launcher controls them): " + " ".join(ignored))
+        app = FlowApp(launcher=True, board=ScanBoard(), stop_event=stop_event,
+                      runs_dir=Path(raw_runs_dir).expanduser() if raw_runs_dir else None)
 
     # The scan must never outlive the TUI: stop the child on every exit path
     # (normal return, a textual crash, an exception) and on terminal-closing
@@ -739,6 +753,23 @@ def _flag_value(argv: list[str], flag: str) -> str | None:
         if arg.startswith(flag + "="):
             return arg.split("=", 1)[1]
     return None
+
+
+def _strip_flag(argv: list[str], flag: str) -> list[str]:
+    """argv without every `flag value`/`flag=value` occurrence of one flag."""
+    rest = []
+    skip_value = False
+    for arg in argv:
+        if skip_value:
+            skip_value = False
+            continue
+        if arg == flag:
+            skip_value = True
+            continue
+        if arg.startswith(flag + "="):
+            continue
+        rest.append(arg)
+    return rest
 
 
 def _profile_from(argv: list[str]) -> str | None:

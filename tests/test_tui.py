@@ -1189,3 +1189,63 @@ def test_flow_app_launcher_session_reports_source_errors_in_the_log_pane(tmp_pat
             assert app.is_running  # no NoMatches traceback took the app down
 
     asyncio.run(scenario())
+
+
+def test_run_flow_launcher_honors_passthrough_runs_dir(tmp_path, monkeypatch, capsys):
+    from wpbuddy import config
+    from wpbuddy.tui import app as flow
+
+    monkeypatch.chdir(tmp_path)  # CWD has no wpbuddy-audit
+    root = tmp_path / "my-runs"
+    run = root / "acme.test" / "runs" / "20261104-120000-abc"
+    _write_events(run / "events.jsonl", _script())
+    monkeypatch.setattr(config, "RUNS_DIR", None)  # restored after the test
+    _FakeApp.instances.clear()
+    monkeypatch.setattr(flow, "FlowApp", _FakeApp)
+
+    assert flow.run_flow(["--runs-dir", str(root), "--stealth"]) == 0
+    launcher = _FakeApp.instances[-1]
+    assert launcher.kwargs["launcher"] is True
+    assert launcher.kwargs["runs_dir"] == root  # the launcher follows the flag
+    assert flow.runs_root() == root  # ...and config.RUNS_DIR was set from it
+    out = capsys.readouterr().out
+    assert "--stealth" in out and "ignor" in out.lower()  # other flags: a notice
+
+
+def test_flow_app_launcher_follows_the_runs_dir_arg(tmp_path, monkeypatch):
+    from wpbuddy.tui import app as flow
+
+    root = tmp_path / "my-runs"
+    listed = root / "acme.test" / "runs" / "20260101-000000-old"
+    _write_events(listed / "events.jsonl", _script())  # shown in the list
+    spawned = root / "acme.test" / "runs" / "20261104-120000-abc"  # the child writes
+
+    def fake_popen(cmd, **kwargs):
+        return _FakePopen(cmd, events_path=spawned / "events.jsonl",
+                          events=_script(), **kwargs)
+
+    monkeypatch.setattr(flow.subprocess, "Popen", fake_popen)
+    _FakePopen.spawns.clear()
+    app = flow.FlowApp(launcher=True, board=ScanBoard(), runs_dir=root)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            rows = [text for item in app.query_one("#previous").children
+                    for text in _item_texts(item)]
+            assert any("acme.test" in row and "10 events" in row
+                       for row in rows)  # listed from the --runs-dir root
+            app.query_one("#target").value = "https://acme.test/"
+            await pilot.pause()
+            argv = app.screen.built_argv()
+            assert argv[argv.index("--runs-dir") + 1] == str(root)
+            assert "--stealth" not in argv  # launcher mode never forwards those
+            assert f"--runs-dir {root}" in app.command
+            app.query_one("#launch").press()
+            await pilot.pause()
+            await _settle(app)
+            assert app.screen.query_one("#rail")  # launched and tailed
+            spawn = _FakePopen.spawns[0]
+            assert spawn.cmd[spawn.cmd.index("--runs-dir") + 1] == str(root)
+            assert app.board.stats()["status"] == "completed"  # child wrote where we watch
+
+    asyncio.run(scenario())
