@@ -138,6 +138,11 @@ _AUDIT_ENABLED = Precondition(
     lambda ctx: _arg(ctx.args, "audit_code", "off") != "off",
     "--audit-code off")
 
+_PROFILE_DEEP = Precondition(
+    "profile-deep", "--profile deep opted into aggressive discovery",
+    lambda ctx: _arg(ctx.args, "profile", "safe") == "deep",
+    "aggressive discovery needs --profile deep")
+
 
 def default_graph():
     """The canonical WpBuddy phase order."""
@@ -183,6 +188,22 @@ def default_graph():
                              "wp-cron, CORS, cookie flags, heartbeat exposure"),
                 SubphaseSpec("auth-check", "Authenticated check",
                              "identity/capability mapping when credentials were supplied"),
+            )),
+
+        PhaseSpec(
+            "deep-discovery", "Aggressive discovery", "deep-profile breadth: recursive "
+            "crawl with JS/form mining, REST route inventory and content discovery",
+            handler="deep_discovery", preconditions=(_PROFILE_DEEP, _TARGET_ALIVE),
+            inputs=("target",), outputs=("pages", "forms", "routes", "backups"),
+            subphases=(
+                SubphaseSpec("crawl", "Recursive crawl",
+                             "same-site BFS within --max-pages, forms and admin-ajax "
+                             "actions mined from JS"),
+                SubphaseSpec("routes", "Route inventory",
+                             "/wp-json/ route table plus anonymous OPTIONS per route"),
+                SubphaseSpec("content", "Content discovery",
+                             "backup/extension mutations calibrated against the "
+                             "soft-404 baseline, bounded async pool"),
             )),
 
         PhaseSpec(

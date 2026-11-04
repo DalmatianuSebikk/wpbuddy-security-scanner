@@ -38,6 +38,17 @@ LIST_METHODS_XML = """<?xml version="1.0"?>
 
 METHODS = ["system.multicall", "system.listMethods", "wp.getUsersBlogs", "pingback.ping"]
 
+# REST routes the mock knows about (drives /wp-json/<route> OPTIONS answers)
+_ROUTES = {
+    "": ["GET"],
+    "wp/v2/posts": ["GET", "POST"],
+    "wp/v2/pages": ["GET"],
+    "wp/v2/users": ["GET"],
+    "wp/v2/settings": ["GET", "POST", "DELETE"],
+    "contact-form-7/v1/contact-forms": ["GET", "POST"],
+    "wpdiscuz/v1/ping": ["GET", "POST"],
+}
+
 
 class MockWPHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -74,6 +85,22 @@ class MockWPHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
         self.wfile.write(body)
+
+    # ---------------- OPTIONS ----------------
+    def do_OPTIONS(self):
+        """Route inventory support (deep profile): known REST routes answer
+        with Allow; everything else 404s like real WordPress."""
+        path = unquote(urlsplit(self.path).path)
+        if path.startswith("/wp-json/"):
+            route = path[len("/wp-json/"):]
+            if route in _ROUTES:
+                methods = ",".join(sorted(_ROUTES[route]))
+                self.send_response(204)
+                self.send_header("Allow", methods)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+        self._send(404, "no route", "text/plain")
 
     # ---------------- GET ----------------
     def do_GET(self):

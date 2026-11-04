@@ -88,6 +88,12 @@ def _h_passive(ctx, emit):
         ctx.report.rule()
 
 
+def _h_deep_discovery(ctx, emit):
+    from ..passive import contentdisc, deep
+    deep.run(ctx.report, ctx.target, ctx.args, emit=emit)
+    contentdisc.run(ctx.report, ctx.target, emit=emit)
+
+
 def _h_active(ctx, emit):
     from .. import active
     result = active.run(ctx.report, ctx.target, ctx.args, dict_list=ctx.dict_list,
@@ -192,6 +198,7 @@ def _section(emit, name, action, skip_message):
 HANDLERS = {
     "liveness": _h_liveness,
     "passive": _h_passive,
+    "deep_discovery": _h_deep_discovery,
     "active": _h_active,
     "access": _h_access,
     "code-audit": _h_code_audit,

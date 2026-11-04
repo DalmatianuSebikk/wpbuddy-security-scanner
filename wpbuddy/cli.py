@@ -182,6 +182,11 @@ Examples:
                         help="Hard request ceiling for the whole run (budget enforcement)")
     parser.add_argument("--max-time", type=float, default=None, metavar="SECONDS",
                         help="Hard wall-clock ceiling for the whole run")
+    parser.add_argument("--profile", choices=("safe", "deep"), default="safe",
+                        help="Aggression profile (roadmap 1/3): safe = the default "
+                             "GET-only scan; deep = adds recursive crawling, REST route "
+                             "inventory and content discovery - more requests, still "
+                             "no writes (default: %(default)s)")
     parser.add_argument("--version", action="version", version=f"WpBuddy {__version__}")
     return parser
 

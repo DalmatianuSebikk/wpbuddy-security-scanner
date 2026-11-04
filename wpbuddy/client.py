@@ -108,13 +108,17 @@ class AsyncClient:
     silent fallback to something slower.
     """
 
-    def __init__(self, persona=None, impersonate=False, timeout=None):
+    def __init__(self, persona=None, impersonate=False, timeout=None, gate=None):
         self.timeout = timeout or config.DEFAULT_TIMEOUT
         self.persona = stealth.pick_persona(persona)
         self.headers = stealth.base_headers(self.persona)
         self._impersonate = impersonate
         self._backend = None
         self._kind = None
+        self._gate_warned = False
+        # optional pre-send gate (engagement budget/exclusions, roadmap 2.3):
+        # returns None to allow, or a reason string to block the request
+        self.gate = gate
 
     def _ensure_backend(self):
         if self._kind is not None:
@@ -148,8 +152,17 @@ class AsyncClient:
         self._ensure_backend()
         return self._kind
 
-    async def request(self, method, url, headers=None, **kwargs):
-        """One async request. Returns the backend response or None."""
+    def _gate_reason(self, url, quiet=False):
+        if self.gate is None:
+            return None
+        reason = self.gate(url)
+        if reason is not None and not quiet and not self._gate_warned:
+            self._gate_warned = True
+            print(f"[!] Stopping: {reason}")
+        return reason
+
+    async def _send(self, method, url, headers=None, **kwargs):
+        """The actual backend call, no gate (callers gate first)."""
         self._ensure_backend()
         merged = dict(self.headers)
         merged.update(headers or {})
@@ -162,6 +175,12 @@ class AsyncClient:
             print(f"[!] async client: {url} failed ({exc})")
             return None
 
+    async def request(self, method, url, headers=None, **kwargs):
+        """One async request (engagement-gated). Returns the response or None."""
+        if self._gate_reason(url) is not None:
+            return None
+        return await self._send(method, url, headers, **kwargs)
+
     async def get(self, url, **kwargs):
         return await self.request("GET", url, **kwargs)
 
@@ -172,14 +191,26 @@ class AsyncClient:
         """Fetch many URLs through a bounded pool.
 
         `rate` is an optional AIMDRate controller (per-request pacing);
-        `on_result(url, response_or_None)` fires as results arrive. Returns
-        {url: response_or_None} in input order.
+        `on_result(url, response_or_None)` fires as results arrive. A gate
+        block (budget exhausted / path excluded) CANCELS the remaining
+        candidates instead of pacing them - a budget is not a rate signal.
+        Returns {url: response_or_None}.
         """
+        cancelled = asyncio.Event()
 
         async def one(url):
+            if cancelled.is_set():
+                return url, None
+            if self._gate_reason(url, quiet=True) is not None:
+                cancelled.set()
+                if not self._gate_warned:
+                    self._gate_warned = True
+                    print("[!] Stopping: remaining candidates skipped "
+                          "(engagement limit reached)")
+                return url, None
             if rate is not None:
                 await asyncio.sleep(rate.delay())
-            resp = await self.get(url)
+            resp = await self._send("GET", url)
             if rate is not None:
                 rate.observe(resp)
             if on_result is not None:

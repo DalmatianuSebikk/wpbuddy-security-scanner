@@ -3276,6 +3276,81 @@ def test_scan_registers_outputs_as_run_artifacts(mock, tmp_path, monkeypatch):
     assert "knowledge graph (JSON)" in described
 
 
+# ------------------------------------------------------------- aggressive discovery (§3)
+
+def test_deep_crawl_mines_forms_and_ajax_actions(mock):
+    """The recursive crawl collects internal pages, forms and admin-ajax
+    action names mined from inline JS."""
+    from wpbuddy.passive import deep
+    pages, forms, ajax_actions = deep.deep_crawl(mock, max_pages=5)
+    assert any("/about/" in p for p in pages)
+    assert any(f["action"].endswith("/subscribe") and "email" in f["fields"]
+               for f in forms)
+    assert "wpbuddy_subscribe" in ajax_actions
+
+
+def test_route_inventory_lists_anonymous_write_surface(mock):
+    """/wp-json/ routes are inventoried; OPTIONS decides what anonymous
+    callers may write to."""
+    from wpbuddy.passive import deep
+    report = Report()
+    inventory = deep.route_inventory(report, mock)
+    assert inventory is not None
+    assert "/wp/v2/posts" in inventory
+    assert "POST" in inventory["/wp/v2/posts"]["anon_methods"]
+    text = report.doc.write()
+    assert "REST route inventory" in text
+    assert "`/wp/v2/posts` - anonymous POST" in text
+
+
+def test_content_discovery_finds_dump_with_budget(mock, monkeypatch):
+    """The mutation grid finds the mock's dump.sql; an exhausted engagement
+    budget blocks requests instead of firing them."""
+    from wpbuddy import config
+    from wpbuddy.engagement import Budget, Engagement
+    from wpbuddy.passive import contentdisc
+
+    report = Report()
+    found = contentdisc.run(report, mock)
+    found_urls = [url for url, _ in found]
+    assert any(url.endswith("dump.sql") for url in found_urls)
+    text = report.doc.write()
+    assert "Deep content discovery" in text
+    assert "SQL dump content" in text
+
+    # budget ceiling: nothing is sent once the run budget is spent
+    engagement = Engagement(target=mock, host="x", max_requests=1)
+    monkeypatch.setattr(config, "ENGAGEMENT", engagement)
+    monkeypatch.setattr(config, "RUN_BUDGET", Budget.from_engagement(engagement))
+    report = Report()
+    found = contentdisc.run(report, mock)
+    assert found == []
+
+
+def test_cli_deep_profile_scan(mock, tmp_path, monkeypatch):
+    """--profile deep runs the discovery phase; the default profile skips it."""
+    monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: None)
+    monkeypatch.chdir(tmp_path)
+    from wpbuddy import cli
+
+    out = tmp_path / "deep"
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["scan", "--target", mock, "--pluginList", "", "--audit-code", "off",
+                  "--profile", "deep", "--output", str(out)])
+    assert exc.value.code == 0
+    text = out.with_suffix(".md").read_text(encoding="utf-8")
+    assert "REST route inventory (deep)" in text
+    assert "Deep content discovery (deep profile)" in text
+    assert "admin-ajax actions mined" in text
+
+    out = tmp_path / "safe"
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["scan", "--target", mock, "--pluginList", "", "--audit-code", "off",
+                  "--output", str(out)])
+    assert exc.value.code == 0
+    assert "(deep)" not in out.with_suffix(".md").read_text(encoding="utf-8")
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

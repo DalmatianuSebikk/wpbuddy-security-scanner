@@ -50,7 +50,7 @@ def _context(tmp_path, **overrides):
 def test_graph_is_documented_and_dispatchable():
     graph = default_graph()
     assert [p.id for p in graph.run_stage()] == [
-        "liveness", "passive", "active", "access", "code-audit"]
+        "liveness", "passive", "deep-discovery", "active", "access", "code-audit"]
     assert [p.id for p in graph.finalize_stage()] == [
         "waf-analysis", "error-analysis", "report"]
     for phase in graph:
