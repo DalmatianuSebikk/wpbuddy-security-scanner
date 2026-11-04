@@ -1,3 +1,44 @@
-.swarm/
+# --- Python ---
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# --- secrets / environment files ---
+.env
+.env.*
+*.env
+
+# --- scanner output (generated per scan, never commit findings) ---
+outputScan*
+wpbuddy-audit/
+
+# --- AI assistants / agents (local tool state, not project source) ---
+.claude/
+.claude*
+.cursor/
+.cursorrules
+.cursorignore
+.windsurf/
+.continue/
+.aider*
+.codeium/
+.copilot*
+.zcode/
+.gemini/
+
+# --- editors / OS ---
 .DS_Store
-wpbuddy-security-scanner/.swarm/
+.idea/
+.vscode/
+*.swp
+
+# --- local agent/swarm state (dead plugin, keep out of the repo) ---
+.swarm/
+.swarm-worktrees/
