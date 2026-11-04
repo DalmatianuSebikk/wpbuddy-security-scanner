@@ -27,6 +27,7 @@ def _isolate_scan_state(tmp_path):
         "_consecutive_failures": httpclient._consecutive_failures,
         "_rate_limit_backoff": httpclient._rate_limit_backoff,
         "_inspect_warned": httpclient._inspect_warned,
+        "_budget_warned": getattr(httpclient, "_budget_warned", False),
     }
 
     # vulnerability-cache isolation: never read/write the developer's real

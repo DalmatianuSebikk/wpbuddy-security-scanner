@@ -3070,6 +3070,92 @@ def test_unimplemented_subcommands_say_so(capsys):
         assert "not implemented" in capsys.readouterr().out
 
 
+# ------------------------------------------------------------- engagement model (§2.3)
+
+def test_engagement_scope_and_effects():
+    from wpbuddy.engagement import Engagement
+    e = Engagement(target="https://x.example.com/", host="x.example.com",
+                   authorization="contract #42",
+                   excluded_paths=("/wp-admin", "/wp-content/uploads"),
+                   allowed_effects=("read", "file-write"))
+    assert e.allows_effect("read") and e.allows_effect("file-write")
+    assert not e.allows_effect("code-exec")
+    assert e.excludes("https://x.example.com/wp-admin/admin.php")
+    assert e.excludes("https://x.example.com/wp-content/uploads/2024/01/a.jpg")
+    assert not e.excludes("https://x.example.com/wp-content/plugins/x/readme.txt")
+    # default engagement is read-only
+    assert Engagement(target="https://y.example.com/").allows_effect("read")
+    assert not Engagement(target="https://y.example.com/").allows_effect("user-create")
+    # round-trip persistence
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "engagement.json"
+        e.save(path)
+        assert Engagement.load(path).to_dict() == e.to_dict()
+
+
+def test_engagement_budget_enforced_in_http_layer(mock, monkeypatch, capsys):
+    """--max-requests/--exclude-path are hard gates inside the real request
+    path: the SESSION is never reached once the gate says no."""
+    from wpbuddy import config, httpclient
+    from wpbuddy.engagement import Budget, Engagement
+
+    sent = []
+
+    class FakeSession:
+        def request(self, method, url, timeout=None, headers=None, **kw):
+            sent.append(url)
+            return FakeResp(200, "ok", url=url)
+
+    monkeypatch.setattr(httpclient, "SESSION", FakeSession())
+
+    engagement = Engagement(target=mock, host="x", excluded_paths=("/private",),
+                            max_requests=2)
+    monkeypatch.setattr(config, "ENGAGEMENT", engagement)
+    monkeypatch.setattr(config, "RUN_BUDGET", Budget.from_engagement(engagement))
+
+    assert httpclient.get(mock + "page1") is not None   # request 1
+    assert httpclient.get(mock + "page2") is not None   # request 2
+    assert httpclient.get(mock + "page3") is None       # budget exhausted
+    assert sent == [mock + "page1", mock + "page2"]
+    assert httpclient.get(mock + "private/secret") is None   # excluded, nothing sent
+    assert "Stopping" in capsys.readouterr().out
+
+
+def test_engagement_budget_unit():
+    from wpbuddy.engagement import Budget
+    b = Budget(max_requests=3, max_seconds=None)
+    assert b.record_request() and b.record_request() and b.record_request()
+    assert b.record_request() is False
+    assert "request budget exhausted" in b.exceeded_reason
+    assert b.to_dict()["requests"] == 3
+
+    tb = Budget(max_requests=None, max_seconds=0.0)
+    assert tb.record_request() is False          # time ceiling already passed
+    assert "time budget" in tb.exceeded_reason
+
+
+def test_cli_scan_persists_engagement_in_run_dir(mock, tmp_path, monkeypatch):
+    """The run directory records the engagement (audit trail)."""
+    monkeypatch.setattr(vulndb, "_fetch", lambda kind, slug: None)
+    monkeypatch.chdir(tmp_path)
+    from wpbuddy import cli
+
+    out = tmp_path / "eng"
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["scan", "--target", mock, "--pluginList", "", "--audit-code", "off",
+                  "--authorization", "contract #7", "--exclude-path", "/wp-admin",
+                  "--output", str(out)])
+    assert exc.value.code == 0
+    runs = list((tmp_path / "wpbuddy-audit").glob("*/runs/*/engagement.json"))
+    assert len(runs) == 1
+    from wpbuddy.engagement import Engagement
+    saved = Engagement.load(runs[0])
+    assert saved.authorization == "contract #7"
+    assert saved.excluded_paths == ("/wp-admin",)
+    assert saved.allowed_effects == ("read",)
+
+
 def test_cli_rejects_bad_target():
     from wpbuddy import cli
     with pytest.raises(SystemExit) as exc:

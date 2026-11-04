@@ -42,6 +42,13 @@ OFFLINE = False
 AUTH_COOKIE = None     # raw Cookie header value (--cookie)
 AUTH_BASIC = None      # pre-encoded Basic credentials (--app-password)
 
+# Engagement model (roadmap §2.3): scope/authorization/budgets/effects for
+# THIS run, consumed by the HTTP layer (budget/exclusions) and by the
+# discovery worker and exploit runner (effects gate). None = no engagement
+# (legacy/tests); the scanner still behaves read-only by construction.
+ENGAGEMENT = None
+RUN_BUDGET = None
+
 # Passive crawling
 MAX_CRAWL_PAGES = 5
 

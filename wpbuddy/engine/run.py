@@ -58,6 +58,9 @@ class ScanContext:
     fail_reason: str | None = None
     write_failed: bool = False
     started: float = field(default_factory=time.monotonic)
+    # Engagement (roadmap 2.3): scope/authorization/budgets; persisted with
+    # the run when a run store is attached.
+    engagement: object | None = None
 
 
 # --------------------------------------------------------------------------
@@ -267,6 +270,13 @@ class ScanEngine:
             self.ctx.run_id = self.store.create(self.ctx.target, argv)
             if self.ctx.run_id:
                 self._unsubscribe.append(self.store.attach(self.ctx.bus))
+                # the engagement is part of the run's audit trail (roadmap 2.3)
+                engagement = getattr(self.ctx, "engagement", None)
+                if engagement is not None:
+                    try:
+                        engagement.save(self.store.dir / "engagement.json")
+                    except Exception as exc:  # the scan never dies on bookkeeping
+                        print(f"[*] Could not persist the engagement: {exc}")
         scan_events.set_sink(self.ctx.bus)
         if self.explain:
             self._unsubscribe.append(self.ctx.bus.subscribe(ExplainPrinter()))

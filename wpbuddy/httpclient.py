@@ -92,6 +92,25 @@ def _auth_headers(url):
     return headers
 
 
+def _engagement_gate(url):
+    """Engagement enforcement (roadmap 2.3): excluded paths are never
+    requested, and the run's request/time budget is a hard ceiling.
+
+    Returns None when the request may proceed, or the reason string when it
+    must not be sent.
+    """
+    engagement = getattr(config, "ENGAGEMENT", None)
+    if engagement is not None and engagement.excludes(url):
+        return f"path excluded by the engagement scope: {url}"
+    budget = getattr(config, "RUN_BUDGET", None)
+    if budget is not None and not budget.record_request():
+        return budget.exceeded_reason
+    return None
+
+
+_budget_warned = False
+
+
 def request(method, url, *, timeout=None, retries=config.DEFAULT_RETRIES,
             retry_delay=config.RETRY_DELAY, referer=None, **kwargs):
     """Send an HTTP request with retries on connection-level failures.
@@ -109,6 +128,18 @@ def request(method, url, *, timeout=None, retries=config.DEFAULT_RETRIES,
         init_networking()
     timeout = config.DEFAULT_TIMEOUT if timeout is None else timeout
     extra_headers = dict(kwargs.pop("headers", None) or {})
+
+    # Engagement gate: excluded paths and exhausted budgets stop HERE (the
+    # request is never sent); the failure reads as unreachable to callers.
+    gate_reason = _engagement_gate(url)
+    if gate_reason:
+        global _budget_warned
+        if not _budget_warned:
+            _budget_warned = True
+            print(f"[!] Stopping: {gate_reason}")
+        from .engine import events as _events
+        _events.emit_event(_events.EventType.LOG, url=url, message=gate_reason)
+        return None
 
     global _consecutive_failures, _rate_limit_backoff
     if _consecutive_failures >= CONSECUTIVE_FAILURE_LIMIT:

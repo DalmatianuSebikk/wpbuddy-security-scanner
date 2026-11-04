@@ -8,6 +8,7 @@ from datetime import datetime
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from . import __version__, confidence, config, httpclient
+from .engagement import EFFECTS, Budget, Engagement
 from .engine import reporting
 from .report import Report
 
@@ -168,6 +169,19 @@ Examples:
     parser.add_argument("--no-run-log", action="store_true",
                         help="Do not write the append-only run log "
                              "(wpbuddy-audit/<host>/runs/<run_id>/events.jsonl)")
+    parser.add_argument("--authorization", metavar="TEXT",
+                        help="Engagement scope (roadmap 2.3/9): text proving authorization for "
+                             "this target (contract id, ticket, owner name); stored with the run")
+    parser.add_argument("--exclude-path", action="append", default=[], metavar="PREFIX",
+                        help="Never request paths under this prefix (repeatable), e.g. /wp-admin/")
+    parser.add_argument("--allow-effect", action="append", default=[], metavar="EFFECT",
+                        choices=EFFECTS,
+                        help="Allow a state-changing effect for this run (repeatable): "
+                             + ", ".join(EFFECTS) + ". Default allows read-only work")
+    parser.add_argument("--max-requests", type=int, default=None, metavar="N",
+                        help="Hard request ceiling for the whole run (budget enforcement)")
+    parser.add_argument("--max-time", type=float, default=None, metavar="SECONDS",
+                        help="Hard wall-clock ceiling for the whole run")
     parser.add_argument("--version", action="version", version=f"WpBuddy {__version__}")
     return parser
 
@@ -431,6 +445,25 @@ def _cmd_scan(argv=None):
 
     suppressions = config.load_lines(args.suppressions) if args.suppressions else []
 
+    # Engagement (roadmap 2.3): scope, authorization, budgets, allowed
+    # effects. Every run carries its own contract; state-changing work is
+    # impossible without explicitly allowing its effect.
+    engagement = Engagement(
+        target=target, host=config.TARGET_HOST,
+        authorization=args.authorization,
+        excluded_paths=tuple(args.exclude_path),
+        max_requests=args.max_requests, max_seconds=args.max_time,
+        allowed_effects=tuple({"read", *args.allow_effect}),
+    )
+    config.ENGAGEMENT = engagement
+    config.RUN_BUDGET = Budget.from_engagement(engagement)
+    if args.allow_effect:
+        print(f"[*] Engagement allows effects beyond read-only: "
+              f"{', '.join(args.allow_effect)}")
+    if not engagement.authorization and args.allow_effect:
+        print("[!] Warning: state-changing effects are allowed but --authorization is "
+              "empty - record the consent reference for the audit trail")
+
     # One report/model/bus for the whole run: every phase writes to them and
     # every decision is recorded, whether or not a view is attached.
     report = Report()
@@ -448,7 +481,8 @@ def _cmd_scan(argv=None):
     store = None if (args.no_run_log or args.plan) else RunStore(config.TARGET_HOST)
     ctx = ScanContext(target=target, args=args, report=report, model=model, bus=bus,
                       dict_list=dict_list, suppressions=suppressions, output=output,
-                      json_output=args.json, diff=args.diff)
+                      json_output=args.json, diff=args.diff,
+                      engagement=engagement)
     engine = ScanEngine(ctx, graph=default_graph(), store=store, explain=args.explain)
 
     if args.plan:
