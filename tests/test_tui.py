@@ -595,3 +595,107 @@ def test_flow_app_bindings_copy_about_and_quit(tmp_path):
             assert not app.is_running
 
     asyncio.run(scenario())
+
+
+def test_flow_app_arrow_keys_move_the_phase_detail(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())
+    app = FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                  command=f"wpbuddy flow --run {events}", target="acme.test")
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await _settle(app)
+            rail = app.query_one("#rail")
+            assert rail.has_focus  # the rail is focused on mount: ↑↓ just work
+            assert rail.index == 0  # liveness
+            assert "verify the target answers" in str(app.query_one("#detail").render())
+            await pilot.press("down")  # arrows highlight; the detail must follow
+            await pilot.pause()
+            assert rail.index == 1
+            assert "GET-only recon" in str(app.query_one("#detail").render())
+            await pilot.press("up")
+            await pilot.pause()
+            assert rail.index == 0
+            assert "verify the target answers" in str(app.query_one("#detail").render())
+
+    asyncio.run(scenario())
+
+
+def test_flow_app_reports_a_broken_source_in_the_log_pane(tmp_path):
+    from wpbuddy.tui.app import FlowApp
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())
+
+    def source():
+        yield from replay(events)
+        raise RuntimeError("the run log vanished")  # a frozen, broken feed
+
+    app = FlowApp(source=source, board=ScanBoard(), command="wpbuddy", target="acme.test")
+
+    async def scenario():
+        async with app.run_test():
+            await _settle(app)
+            assert app.board.stats()["status"] == "completed"  # earlier events landed
+            last = app.query_one("#log").lines[-1].text
+            assert "event source failed: the run log vanished" in last
+
+    asyncio.run(scenario())
+
+
+def test_flow_app_log_pane_caps_its_window_without_dropping_new_lines(tmp_path, monkeypatch):
+    from wpbuddy.tui import app as flow
+
+    events = tmp_path / "events.jsonl"
+    _write_events(events, _script())  # 10 events, window smaller than that
+    monkeypatch.setattr(flow, "_LOG_WINDOW", 5)
+    app = flow.FlowApp(source=lambda: replay(events), board=ScanBoard(),
+                       command="wpbuddy", target="acme.test")
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await _settle(app)
+            assert app.log_lines_rendered == len(_script())  # everything rendered
+            for i in range(3):  # past the window, new events must still land
+                app.apply_event(_event("http-response", "passive", seq=100 + i,
+                                       url=f"http://acme.test/x{i}", status=200))
+            await pilot.pause()
+            assert app.log_lines_rendered == len(_script()) + 3
+            assert "x2" in app.query_one("#log").lines[-1].text  # the newest line
+
+    asyncio.run(scenario())
+
+
+def test_run_flow_with_run_and_target_replays_without_spawning(tmp_path, monkeypatch):
+    from wpbuddy.tui import app as flow
+
+    run = tmp_path / "wpbuddy-audit" / "acme.test" / "runs" / "20261104-120000-abc"
+    _write_events(run / "events.jsonl", _script())
+
+    def no_spawn(*args, **kwargs):
+        raise AssertionError("--run must win: no scan may be spawned")
+
+    monkeypatch.setattr(flow.subprocess, "Popen", no_spawn)
+    _FakeApp.instances.clear()
+    monkeypatch.setattr(flow, "FlowApp", _FakeApp)
+
+    assert flow.run_flow(["--run", str(run / "events.jsonl"),
+                          "--target", "https://other.test/"]) == 0
+    app = _FakeApp.instances[-1]
+    assert app.board.stats()["status"] == "completed"  # replayed the recorded run
+    assert str(run) in app.command  # ...not a spawn of the other target
+    assert app.kwargs["target"] == "acme.test"  # recorded run's host, not --target's
+
+
+def test_spawn_and_locate_tolerates_a_missing_host(tmp_path, monkeypatch):
+    from wpbuddy.tui import app as flow
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(flow.subprocess, "Popen", lambda cmd, **kw: _FakePopen(cmd, **kw))
+    _FakePopen.spawns.clear()
+    events_path, proc = flow._spawn_and_locate(["echo"], None)
+    assert events_path is None  # defensive: a None host must not raise
+    assert proc.poll() == 0

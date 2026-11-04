@@ -53,6 +53,8 @@ _INTERRUPT_GRACE = 5.0
 # How long to wait for a freshly spawned scan to create its run log.
 _RUN_APPEAR_TIMEOUT = 30.0
 _POLL_INTERVAL = 0.1
+# How many log-pane lines to ask the board for (keeps the pane bounded).
+_LOG_WINDOW = 1000
 
 
 def textual_available() -> bool:
@@ -115,6 +117,7 @@ class FlowApp(App):
         self.query_one("#detail", Static).border_title = "phase detail"
         self.query_one("#findings", ListView).border_title = "findings"
         self.query_one("#log", RichLog).border_title = "event log"
+        self.query_one("#rail", ListView).focus()  # ↑↓ drive the rail out of the box
         self.refresh_panes()
         threading.Thread(target=self._pump_source, daemon=True).start()
 
@@ -131,13 +134,20 @@ class FlowApp(App):
         try:
             for event in self._source():
                 self.call_from_thread(self.apply_event, event)
-        except Exception:  # a broken source must never take the app down
-            pass
+        except Exception as exc:  # a broken source must never take the app down
+            try:
+                self.call_from_thread(self._report_source_error, exc)
+            except RuntimeError:  # app already shut down
+                pass
         finally:
             try:
                 self.call_from_thread(self.source_done.set)
             except RuntimeError:  # app already shut down
                 self.source_done.set()
+
+    def _report_source_error(self, exc: Exception) -> None:
+        """A frozen feed must be visible in the log pane, not silent."""
+        self.query_one("#log", RichLog).write(f"[!] event source failed: {exc}")
 
     # ------------------------------------------------------------ refresh
 
@@ -177,14 +187,21 @@ class FlowApp(App):
         return phases[index][1]
 
     def _append_log(self) -> None:
-        lines = self.board.log_tail(self._events_seen)
-        log = self.query_one("#log", RichLog)
-        for line in lines[self.log_lines_rendered:]:
-            log.write(line)
-        self.log_lines_rendered = len(lines)
+        lines = self.board.log_tail(_LOG_WINDOW)  # bounded, unlike the board's log
+        # `lines` is a sliding window: once the board outgrows it, the window
+        # shifts one line per event, so only the not-yet-written tail is new.
+        skip = len(lines) - (self._events_seen - self.log_lines_rendered)
+        for line in lines[max(skip, 0):]:
+            self.query_one("#log", RichLog).write(line)
+        self.log_lines_rendered = self._events_seen
 
     def on_list_view_selected(self, event) -> None:
         """Click/Enter on the rail moves the detail pane."""
+        if event.control is self.query_one("#rail"):
+            self._refresh_detail()
+
+    def on_list_view_highlighted(self, event) -> None:
+        """Arrow keys highlight a rail row; the detail pane follows it too."""
         if event.control is self.query_one("#rail"):
             self._refresh_detail()
 
@@ -255,7 +272,7 @@ def run_flow(argv: list[str]) -> int:
         target = host
 
     stop_event = threading.Event()
-    if args.target:
+    if args.target and not args.run:  # --run wins: replay, never spawn
         spawn_cmd = [sys.executable, "-m", "wpbuddy.cli", "scan",
                      "--target", args.target, *passthrough]
         command = " ".join(shlex.quote(part) for part in spawn_cmd)
@@ -309,7 +326,7 @@ def _newest_events_file(root: Path) -> Path | None:
 
 def _spawn_and_locate(spawn_cmd, host):
     """Start the scan subprocess, then wait for its NEW run log to appear."""
-    runs_root = Path("wpbuddy-audit") / host / "runs"
+    runs_root = Path("wpbuddy-audit") / (host or "target") / "runs"
     known = {str(p) for p in runs_root.glob("*/events.jsonl")}
     # POSIX only (macOS/Linux are the targets): the child starts its own
     # session, so it leads a process group a quit-time SIGINT can reach
